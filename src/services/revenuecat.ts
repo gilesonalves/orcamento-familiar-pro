@@ -8,22 +8,44 @@ import {
   type PurchasesPackage,
 } from '@revenuecat/purchases-capacitor'
 
-const API_KEY = import.meta.env.VITE_REVENUECAT_PUBLIC_KEY as string | undefined
+/**
+ * ✅ Use chaves por plataforma (recomendado)
+ * Se você só tem Android, pode manter só a ANDROID.
+ */
+const ANDROID_API_KEY = import.meta.env
+  .VITE_REVENUECAT_ANDROID_PUBLIC_KEY as string | undefined
+const IOS_API_KEY = import.meta.env
+  .VITE_REVENUECAT_IOS_PUBLIC_KEY as string | undefined
+
+// fallback p/ projeto antigo
+const LEGACY_KEY = import.meta.env.VITE_REVENUECAT_PUBLIC_KEY as
+  | string
+  | undefined
+
+const API_KEY =
+  (Capacitor.getPlatform() === 'android' ? ANDROID_API_KEY : IOS_API_KEY) ||
+  LEGACY_KEY
+
 const ENTITLEMENT_ID =
   (import.meta.env.VITE_REVENUECAT_ENTITLEMENT_ID as string | undefined) ||
   'pro'
+
 const OFFERING_ID =
   (import.meta.env.VITE_REVENUECAT_OFFERING_ID as string | undefined) ||
   'default'
+
 const MONTHLY_PACKAGE_ID =
   (import.meta.env.VITE_REVENUECAT_PACKAGE_MONTHLY as string | undefined) ||
   'rc_monthly'
+
 const ANNUAL_PACKAGE_ID =
   (import.meta.env.VITE_REVENUECAT_PACKAGE_ANNUAL as string | undefined) ||
   'rc_annual'
+
 const USER_ID_MODE_RAW =
   (import.meta.env.VITE_REVENUECAT_APP_USER_ID_MODE as string | undefined) ||
   'preferred'
+
 const ANON_USER_ID_KEY = 'orcamento_rc_anonymous_user_id'
 
 export type RevenueCatUserIdMode = 'anonymous' | 'supabase' | 'preferred'
@@ -38,7 +60,7 @@ export const getRevenueCatUserIdMode = (): RevenueCatUserIdMode =>
 export const getRevenueCatOfferingId = () => OFFERING_ID
 export const getRevenueCatMonthlyPackageId = () => MONTHLY_PACKAGE_ID
 export const getRevenueCatAnnualPackageId = () => ANNUAL_PACKAGE_ID
-
+export const getRevenueCatEntitlementId = () => ENTITLEMENT_ID
 export const getRevenueCatPublicKey = () => API_KEY
 
 const createAnonymousId = () => {
@@ -129,30 +151,53 @@ export const getCustomerInfoSummary = (
   }
 }
 
-export const getRevenueCatEntitlementId = () => ENTITLEMENT_ID
-
 export const isRevenueCatEnabled = () =>
   Capacitor.isNativePlatform() && Boolean(API_KEY)
 
-export const initRevenueCat = async (appUserId?: string | null) => {
-  if (!Capacitor.isNativePlatform() || !API_KEY) return false
+/**
+ * ✅ Singleton: garante configure() uma vez só
+ */
+let configurePromise: Promise<boolean> | null = null
 
-  if (import.meta.env.DEV) {
-    Purchases.setLogLevel({ level: LOG_LEVEL.DEBUG })
-  }
+export const ensureRevenueCatConfigured = (appUserId?: string | null) => {
+  if (configurePromise) return configurePromise
 
-  if (appUserId) {
-    await Purchases.configure({ apiKey: API_KEY, appUserID: appUserId })
-  } else {
-    await Purchases.configure({ apiKey: API_KEY })
-  }
+  configurePromise = (async () => {
+    if (!Capacitor.isNativePlatform() || !API_KEY) return false
 
-  if (import.meta.env.DEV) {
-    console.log('[revenuecat] configured')
-  }
+    try {
+      if (import.meta.env.DEV) {
+        // alguns builds aceitam LOG_LEVEL.DEBUG direto
+        // outros aceitam { level: LOG_LEVEL.DEBUG }
+        try {
+          Purchases.setLogLevel({ level: LOG_LEVEL.DEBUG })
+        } catch {
+          // @ts-expect-error fallback
+          Purchases.setLogLevel(LOG_LEVEL.DEBUG)
+        }
+      }
 
-  return true
+      if (appUserId) {
+        await Purchases.configure({ apiKey: API_KEY, appUserID: appUserId })
+      } else {
+        await Purchases.configure({ apiKey: API_KEY })
+      }
+
+      if (import.meta.env.DEV) console.log('[revenuecat] configured')
+      return true
+    } catch (e) {
+      // se falhar, permite tentar de novo depois
+      configurePromise = null
+      throw e
+    }
+  })()
+
+  return configurePromise
 }
+
+// Compat: mantém seu nome antigo (se já usado)
+export const initRevenueCat = async (appUserId?: string | null) =>
+  ensureRevenueCatConfigured(appUserId)
 
 export const getCustomerInfo = async (): Promise<CustomerInfo> => {
   const result = await Purchases.getCustomerInfo()
@@ -174,11 +219,10 @@ export const addCustomerInfoUpdateListener = async (
   listener: (info: CustomerInfo) => void,
 ) => Purchases.addCustomerInfoUpdateListener(listener)
 
-export const removeCustomerInfoUpdateListener = async (
-  listenerId: string,
-) => Purchases.removeCustomerInfoUpdateListener({
-  listenerToRemove: listenerId,
-})
+export const removeCustomerInfoUpdateListener = async (listenerId: string) =>
+  Purchases.removeCustomerInfoUpdateListener({
+    listenerToRemove: listenerId,
+  })
 
 export const getIsProFromCustomerInfo = (
   customerInfo: CustomerInfo,

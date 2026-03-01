@@ -1,6 +1,5 @@
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -8,24 +7,19 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import type {
-  CustomerInfo,
-  PurchasesOfferings,
-  PurchasesPackage,
-} from '@revenuecat/purchases-capacitor'
+import toast from 'react-hot-toast'
 import { useAuth } from '../context/AuthContext'
+
 import {
   addCustomerInfoUpdateListener,
-  getCustomerInfoSummary,
+  ensureRevenueCatConfigured,
   getCustomerInfo,
+  getCustomerInfoSummary,
   getOfferings,
   getRevenueCatAnnualPackageId,
   getRevenueCatEntitlementId,
   getRevenueCatMonthlyPackageId,
   getRevenueCatOfferingId,
-  getRevenueCatPublicKey,
-  getRevenueCatUserIdMode,
-  initRevenueCat,
   isRevenueCatEnabled,
   normalizeRevenueCatErrorMessage,
   purchasePackage,
@@ -34,322 +28,282 @@ import {
   restorePurchases,
 } from '../services/revenuecat'
 
-const CACHE_KEY = 'orcamento_rc_is_pro'
-const CACHE_TS_KEY = 'orcamento_rc_is_pro_ts'
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+type BillingTier = 'free' | 'pro'
 
-export type ProPackageType = 'monthly' | 'annual'
-
-type PackageSet = {
-  monthly?: PurchasesPackage
-  annual?: PurchasesPackage
-  all: PurchasesPackage[]
+type PackagesState = {
+  monthly: any | null
+  annual: any | null
 }
 
 type EntitlementsContextValue = {
+  tier: BillingTier
+  isPro: boolean
   loading: boolean
   processing: boolean
-  isPro: boolean
+  error: string | null
+
   activeEntitlement: string | null
   activeProductIds: string[]
-  error?: string
-  offerings?: PurchasesOfferings
-  packages: PackageSet
-  refresh: () => Promise<void>
-  purchase: (type: ProPackageType) => Promise<void>
-  restore: () => Promise<void>
+
   paywallOpen: boolean
   openPaywall: () => void
   closePaywall: () => void
+
+  packages: PackagesState
+
+  purchase: (kind: 'monthly' | 'annual') => Promise<void>
+  restore: () => Promise<void>
+  refresh: () => Promise<void>
 }
 
-type EntitlementsProviderProps = {
-  children: ReactNode
-}
+const EntitlementsContext = createContext<EntitlementsContextValue | null>(null)
 
-const EntitlementsContext = createContext<EntitlementsContextValue | undefined>(
-  undefined,
-)
+export function EntitlementsProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth() as any // mantenho como você está usando
 
-const getCachedIsPro = () => {
-  if (typeof window === 'undefined') return null
-  const raw = window.localStorage.getItem(CACHE_KEY)
-  const ts = window.localStorage.getItem(CACHE_TS_KEY)
-  if (!ts) return null
-  const parsedTs = Number(ts)
-  if (!Number.isFinite(parsedTs)) return null
-  if (Date.now() - parsedTs > CACHE_TTL_MS) return null
-  return raw === 'true'
-}
-
-const setCachedIsPro = (value: boolean) => {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(CACHE_KEY, String(value))
-  window.localStorage.setItem(CACHE_TS_KEY, String(Date.now()))
-}
-
-const pickOffering = (offerings?: PurchasesOfferings) => {
-  if (!offerings) return undefined
-  const preferredId = getRevenueCatOfferingId()
-  const preferred = offerings.all?.[preferredId]
-  return preferred ?? offerings.current
-}
-
-const pickPackageByType = (
-  offerings: PurchasesOfferings | undefined,
-  type: ProPackageType,
-): PurchasesPackage | undefined => {
-  const current = pickOffering(offerings)
-  const available: PurchasesPackage[] = current?.availablePackages ?? []
-  if (available.length === 0) return undefined
-
-  const targetId =
-    type === 'monthly'
-      ? getRevenueCatMonthlyPackageId()
-      : getRevenueCatAnnualPackageId()
-
-  const byIdentifier = available.find(
-    (pkg: PurchasesPackage) => String(pkg.identifier) === targetId,
-  )
-  if (byIdentifier) return byIdentifier
-
-  const direct = type === 'monthly' ? current?.monthly : current?.annual
-  if (direct) return direct
-
-  const targetType = type === 'monthly' ? 'monthly' : 'annual'
-  return available.find(
-    (pkg: PurchasesPackage) =>
-      String(pkg.packageType).toLowerCase() === targetType,
-  )
-}
-
-export function EntitlementsProvider({ children }: EntitlementsProviderProps) {
-  const { user, userRole } = useAuth()
+  const [paywallOpen, setPaywallOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [processing, setProcessing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
   const [isPro, setIsPro] = useState(false)
+  const [tier, setTier] = useState<BillingTier>('free')
+
   const [activeEntitlement, setActiveEntitlement] = useState<string | null>(null)
   const [activeProductIds, setActiveProductIds] = useState<string[]>([])
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [offerings, setOfferings] = useState<PurchasesOfferings | undefined>(undefined)
-  const [packages, setPackages] = useState<PackageSet>({ all: [] })
-  const [paywallOpen, setPaywallOpen] = useState(false)
 
-  const initializedRef = useRef(false)
-  const lastUserIdRef = useRef<string | null>(null)
+  const [packages, setPackages] = useState<PackagesState>({
+    monthly: null,
+    annual: null,
+  })
 
-  const entitlementId = getRevenueCatEntitlementId()
-  const userIdMode = getRevenueCatUserIdMode()
+  const listenerIdRef = useRef<string | null>(null)
 
-  const openPaywall = useCallback(() => setPaywallOpen(true), [])
-  const closePaywall = useCallback(() => setPaywallOpen(false), [])
+  const appUserId = useMemo(() => {
+    return resolveRevenueCatAppUserId({
+      userId: user?.id ?? null,
+      email: user?.email ?? null,
+    })
+  }, [user?.id, user?.email])
 
-  const updatePackages = useCallback((nextOfferings?: PurchasesOfferings) => {
-    const monthly = pickPackageByType(nextOfferings, 'monthly')
-    const annual = pickPackageByType(nextOfferings, 'annual')
-    const all = pickOffering(nextOfferings)?.availablePackages ?? []
-    setPackages({ monthly, annual, all })
-  }, [])
+  const enabled = isRevenueCatEnabled()
 
-  const updateFromCustomerInfo = useCallback(
-    (customerInfo: CustomerInfo) => {
-      const summary = getCustomerInfoSummary(customerInfo, entitlementId)
-      const adminOverride = userRole === 'admin'
-      const resolved = adminOverride ? true : summary.isPro
-      setIsPro(resolved)
-      setCachedIsPro(resolved)
-      setActiveEntitlement(summary.activeEntitlement)
-      setActiveProductIds(summary.activeProductIds)
-    },
-    [entitlementId, userRole],
-  )
+  const closePaywall = () => setPaywallOpen(false)
+  const openPaywall = () => setPaywallOpen(true)
 
-  const refresh = useCallback(async () => {
-    if (!isRevenueCatEnabled()) {
+  const extractPackages = (offerings: any) => {
+    const offeringId = getRevenueCatOfferingId()
+    const monthlyId = getRevenueCatMonthlyPackageId()
+    const annualId = getRevenueCatAnnualPackageId()
+
+    const current =
+      offerings?.all?.[offeringId] ??
+      offerings?.current ??
+      offerings?.all?.default ??
+      null
+
+    const available: any[] = Array.isArray(current?.availablePackages)
+      ? current.availablePackages
+      : []
+
+    const monthly =
+      available.find(p => p?.identifier === monthlyId) ||
+      available.find(p => p?.packageType === 'MONTHLY') ||
+      null
+
+    const annual =
+      available.find(p => p?.identifier === annualId) ||
+      available.find(p => p?.packageType === 'ANNUAL') ||
+      null
+
+    return { monthly, annual }
+  }
+
+  const applyCustomerSummary = (summary: {
+    isPro: boolean
+    activeEntitlement: string | null
+    activeProductIds: string[]
+  }) => {
+    setIsPro(summary.isPro)
+    setTier(summary.isPro ? 'pro' : 'free')
+    setActiveEntitlement(summary.activeEntitlement)
+    setActiveProductIds(summary.activeProductIds)
+  }
+
+  const clearCustomerSummary = () => {
+    setIsPro(false)
+    setTier('free')
+    setActiveEntitlement(null)
+    setActiveProductIds([])
+  }
+
+  const refresh = async () => {
+    if (!enabled) {
       setLoading(false)
+      setPackages({ monthly: null, annual: null })
+      clearCustomerSummary()
       return
     }
 
     setLoading(true)
-    setError(undefined)
+    setError(null)
 
     try {
-      const [customerInfo, nextOfferings] = await Promise.all([
-        getCustomerInfo(),
-        getOfferings(),
-      ])
-      updateFromCustomerInfo(customerInfo)
-      setOfferings(nextOfferings)
-      updatePackages(nextOfferings)
-      if (import.meta.env.DEV) {
-        const selectedOffering = pickOffering(nextOfferings)
-        const count = selectedOffering?.availablePackages?.length ?? 0
-        console.log('[revenuecat] offerings loaded', {
-          offeringId: selectedOffering?.identifier,
-          count,
-        })
-      }
-    } catch (err) {
-      const message = normalizeRevenueCatErrorMessage(
-        err,
-        'Falha ao atualizar assinatura.',
+      await ensureRevenueCatConfigured(appUserId)
+
+      const offerings = await getOfferings()
+      const nextPackages = extractPackages(offerings)
+      setPackages(nextPackages)
+
+      const info = await getCustomerInfo()
+      const summary = getCustomerInfoSummary(info, getRevenueCatEntitlementId())
+      applyCustomerSummary(summary)
+    } catch (e) {
+      console.error('[entitlements] refresh error', e)
+      setError(
+        normalizeRevenueCatErrorMessage(
+          e,
+          'Erro ao carregar assinaturas. Tente novamente.',
+        ),
       )
-      setError(message)
+      setPackages({ monthly: null, annual: null })
+      clearCustomerSummary()
     } finally {
       setLoading(false)
     }
-  }, [updateFromCustomerInfo, updatePackages])
+  }
 
   useEffect(() => {
-    const cached = getCachedIsPro()
-    if (cached !== null) {
-      setIsPro(cached)
-    }
-  }, [])
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appUserId, enabled])
 
   useEffect(() => {
-    let active = true
+    if (!enabled) return
 
-    const setup = async () => {
-      if (!isRevenueCatEnabled()) {
-        if (import.meta.env.DEV && !getRevenueCatPublicKey()) {
-          setError(
-            'RevenueCat nao configurado: defina VITE_REVENUECAT_PUBLIC_KEY.',
-          )
-        }
-        setLoading(false)
-        return
-      }
+    let mounted = true
 
-      const appUserId = resolveRevenueCatAppUserId({
-        userId: user?.id,
-        email: user?.email,
-      })
-      const shouldInit =
-        !initializedRef.current || lastUserIdRef.current !== appUserId
-
-      if (shouldInit) {
-        initializedRef.current = await initRevenueCat(appUserId)
-        lastUserIdRef.current = appUserId
-      }
-
-      if (!active) return
-      await refresh()
-    }
-
-    void setup()
-
-    return () => {
-      active = false
-    }
-  }, [refresh, user?.email, user?.id, userIdMode])
-
-  useEffect(() => {
-    if (!isRevenueCatEnabled()) return
-
-    let active = true
-    let listenerId: string | null = null
-
-    const handleUpdate = (info: CustomerInfo) => {
-      updateFromCustomerInfo(info)
-    }
-
-    const register = async () => {
-      const id = await addCustomerInfoUpdateListener(handleUpdate)
-      if (!active) return
-      listenerId = id
-    }
-
-    void register()
-
-    return () => {
-      active = false
-      if (listenerId) {
-        void removeCustomerInfoUpdateListener(listenerId)
-      }
-    }
-  }, [updateFromCustomerInfo])
-
-  const purchase = useCallback(
-    async (type: ProPackageType) => {
-      const target = type === 'monthly' ? packages.monthly : packages.annual
-      if (!target) {
-        setError('Plano indisponivel no momento.')
-        return
-      }
-
-      setProcessing(true)
-      setError(undefined)
-
+    ;(async () => {
       try {
-        const result = await purchasePackage(target)
-        const info = result.customerInfo
-        updateFromCustomerInfo(info)
-      } catch (err) {
-        const message = normalizeRevenueCatErrorMessage(
-          err,
-          'Falha ao concluir compra.',
-        )
-        setError(message)
-      } finally {
-        setProcessing(false)
-      }
-    },
-    [packages.annual, packages.monthly, updateFromCustomerInfo],
-  )
+        await ensureRevenueCatConfigured(appUserId)
 
-  const restore = useCallback(async () => {
+        const listenerId = await addCustomerInfoUpdateListener(info => {
+          if (!mounted) return
+          const summary = getCustomerInfoSummary(
+            info,
+            getRevenueCatEntitlementId(),
+          )
+          applyCustomerSummary(summary)
+        })
+
+        listenerIdRef.current = listenerId
+      } catch (e) {
+        console.warn('[entitlements] listener init failed', e)
+      }
+    })()
+
+    return () => {
+      mounted = false
+      if (listenerIdRef.current) {
+        void removeCustomerInfoUpdateListener(listenerIdRef.current)
+        listenerIdRef.current = null
+      }
+    }
+  }, [appUserId, enabled])
+
+  const purchase = async (kind: 'monthly' | 'annual') => {
+    if (!enabled) {
+      toast.error('Assinaturas indisponíveis neste ambiente.')
+      return
+    }
+
+    const pkg = kind === 'monthly' ? packages.monthly : packages.annual
+    if (!pkg) {
+      toast.error('Plano indisponível. Tente abrir o paywall novamente.')
+      return
+    }
+
     setProcessing(true)
-    setError(undefined)
+    setError(null)
 
     try {
-      const info = await restorePurchases()
-      updateFromCustomerInfo(info)
-    } catch (err) {
-      const message = normalizeRevenueCatErrorMessage(
-        err,
-        'Falha ao restaurar compras.',
+      await ensureRevenueCatConfigured(appUserId)
+
+      const result = await purchasePackage(pkg)
+      const info = result.customerInfo
+      const summary = getCustomerInfoSummary(info, getRevenueCatEntitlementId())
+      applyCustomerSummary(summary)
+
+      if (summary.isPro) {
+        toast.success('Assinatura ativada! ✅')
+        closePaywall()
+      } else {
+        toast('Compra concluída. Atualizando status...')
+      }
+    } catch (e) {
+      console.error('[entitlements] purchase error', e)
+      const msg = normalizeRevenueCatErrorMessage(
+        e,
+        'Não foi possível concluir a compra.',
       )
-      setError(message)
+      setError(msg)
+      toast.error(msg)
     } finally {
       setProcessing(false)
     }
-  }, [updateFromCustomerInfo])
+  }
 
-  const value = useMemo<EntitlementsContextValue>(
-    () => ({
-      loading,
-      processing,
-      isPro,
-      activeEntitlement,
-      activeProductIds,
-      error,
-      offerings,
-      packages,
-      refresh,
-      purchase,
-      restore,
-      paywallOpen,
-      openPaywall,
-      closePaywall,
-    }),
-    [
-      loading,
-      processing,
-      isPro,
-      activeEntitlement,
-      activeProductIds,
-      error,
-      offerings,
-      packages,
-      refresh,
-      purchase,
-      restore,
-      paywallOpen,
-      openPaywall,
-      closePaywall,
-    ],
-  )
+  const restore = async () => {
+    if (!enabled) {
+      toast.error('Restaurar indisponível neste ambiente.')
+      return
+    }
+
+    setProcessing(true)
+    setError(null)
+
+    try {
+      await ensureRevenueCatConfigured(appUserId)
+
+      const info = await restorePurchases()
+      const summary = getCustomerInfoSummary(info, getRevenueCatEntitlementId())
+      applyCustomerSummary(summary)
+
+      if (summary.isPro) {
+        toast.success('Compras restauradas ✅')
+        closePaywall()
+      } else {
+        toast('Nenhuma assinatura ativa encontrada.')
+      }
+    } catch (e) {
+      console.error('[entitlements] restore error', e)
+      const msg = normalizeRevenueCatErrorMessage(
+        e,
+        'Erro ao restaurar compras.',
+      )
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const value: EntitlementsContextValue = {
+    tier,
+    isPro,
+    loading,
+    processing,
+    error,
+    activeEntitlement,
+    activeProductIds,
+    paywallOpen,
+    openPaywall,
+    closePaywall,
+    packages,
+    purchase,
+    restore,
+    refresh,
+  }
 
   return (
     <EntitlementsContext.Provider value={value}>
@@ -358,12 +312,10 @@ export function EntitlementsProvider({ children }: EntitlementsProviderProps) {
   )
 }
 
-export const useEntitlementsContext = () => {
+export function useEntitlementsContext() {
   const ctx = useContext(EntitlementsContext)
   if (!ctx) {
-    throw new Error('useEntitlements deve ser usado dentro do EntitlementsProvider')
+    throw new Error('useEntitlementsContext must be used within provider')
   }
   return ctx
 }
-
-export const useSubscription = useEntitlementsContext

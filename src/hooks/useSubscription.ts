@@ -1,3 +1,3 @@
-import { useSubscription as useSubscriptionContext } from '../contexts/EntitlementsContext'
+import { useEntitlements } from './useEntitlements'
 
-export const useSubscription = () => useSubscriptionContext()
+export const useSubscription = useEntitlements
