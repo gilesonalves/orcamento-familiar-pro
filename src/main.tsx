@@ -1,9 +1,12 @@
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { setupMobileAuthListener } from './mobileAuth'
+import { isNativeApp } from './lib/platform'
 import './index.css'
 
-setupMobileAuthListener()
+if (isNativeApp()) {
+  setupMobileAuthListener()
+}
 
 // Evita que um service worker antigo (build mobile/produção) quebre o HMR no dev server
 if (import.meta.env.DEV && 'serviceWorker' in navigator) {

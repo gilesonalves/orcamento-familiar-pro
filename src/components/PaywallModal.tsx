@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useEntitlements } from '../hooks/useEntitlements'
 
 const formatSavings = (monthly?: number, annual?: number) => {
@@ -33,16 +33,6 @@ export function PaywallModal() {
     }
     return formatSavings(monthlyPrice, annualPrice)
   }, [monthly, annual])
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return
-    console.log('[paywall] PaywallModal mounted')
-  }, [])
-
-  useEffect(() => {
-    if (!import.meta.env.DEV || !paywallOpen) return
-    console.log('[paywall] opened')
-  }, [paywallOpen])
 
   if (!paywallOpen) return null
 

@@ -23,9 +23,6 @@ export function TrialExpiredBanner() {
         <button
           type="button"
           onClick={() => {
-            if (import.meta.env.DEV) {
-              console.log('[paywall] CTA clicked')
-            }
             openPaywall()
           }}
           className="w-full rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-amber-300 sm:w-auto"

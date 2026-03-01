@@ -1,18 +1,29 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { SpeechRecognition } from '@capacitor-community/speech-recognition'
+import { toast } from 'sonner'
 import {
   useBudget,
   type DespesaVariavel,
   type DespesaVariavelInput,
+  type PerfilOrcamento,
 } from '../context/BudgetContext'
-import { useEntitlements } from '../hooks/useEntitlements'
-
+import { useAuth } from '../context/AuthContext'
+import { VoiceExpenseConfirmModal } from './VoiceExpenseConfirmModal'
+import { parseVoiceExpenseCommand, type ParsedVoiceExpense } from '../utils/voiceExpenseParser'
+import {
+  getSpeechExpenseErrorMessage,
+  startExpenseSpeechRecognition,
+} from '../services/speechRecognition'
+import { calculateVoiceConfidence } from '../utils/voiceExpenseParser'
 type Props = {
-  onSave: (data: DespesaVariavelInput) => void
-  onSaveMany?: (items: DespesaVariavelInput[]) => void
+  onSave: (data: DespesaVariavelInput) => Promise<boolean>
+  onSaveMany?: (items: DespesaVariavelInput[]) => Promise<void>
   editing?: DespesaVariavel | null
   onCancel?: () => void
   disabled?: boolean
+  perfil?: PerfilOrcamento
+  onVoiceLauncherReady?: (launcher: (() => Promise<void>) | null) => void
 }
 
 type DespesaVariavelFormState = Omit<DespesaVariavelInput, 'valor'> & {
@@ -132,11 +143,20 @@ export function DespesasVariaveisForm({
   editing,
   onCancel,
   disabled,
+  perfil = 'familiar',
+  onVoiceLauncherReady,
 }: Props) {
   const { trialActive } = useBudget()
-  const { isPro } = useEntitlements()
+  const { isPro } = useAuth()
   const [form, setForm] = useState<DespesaVariavelFormState>(defaultForm)
+  const [voiceError, setVoiceError] = useState('')
+  const [voiceLoading, setVoiceLoading] = useState(false)
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false)
+  const [voiceDraft, setVoiceDraft] = useState<ParsedVoiceExpense | null>(null)
+  const [voiceToast, setVoiceToast] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
   const isDisabled = disabled ?? (!trialActive && !isPro)
+  const isSubmitDisabled = isDisabled || isSaving
   const fieldTitle = isDisabled ? 'Seu trial expirou' : undefined
 
   useEffect(() => {
@@ -155,61 +175,203 @@ export function DespesasVariaveisForm({
     }
   }, [editing])
 
-  const handleSubmit = (event: FormEvent) => {
+  useEffect(() => {
+    if (!voiceToast) return
+    const timeout = window.setTimeout(() => {
+      setVoiceToast('')
+    }, 2500)
+
+    return () => window.clearTimeout(timeout)
+  }, [voiceToast])
+
+  const saveSingleExpense = async (payload: DespesaVariavelInput) => {
+    const saved = await onSave(payload)
+    return saved
+  }
+
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
-    if (isDisabled) {
+    if (isSubmitDisabled) {
       return
     }
-    const total = Number(form.valor) || 0
-    const parcelas = Math.max(1, Math.floor(Number(form.parcelas) || 1))
+    setIsSaving(true)
+    try {
+      const total = Number(form.valor) || 0
+      const parcelas = Math.max(1, Math.floor(Number(form.parcelas) || 1))
 
-    const payload: DespesaVariavelInput = {
-      data: form.data,
-      categoria: form.categoria,
-      descricao: form.descricao,
-      formaPagamento: form.formaPagamento,
-      valor: total,
-      essencial: form.essencial,
-    }
+      const payload: DespesaVariavelInput = {
+        data: form.data,
+        categoria: form.categoria,
+        descricao: form.descricao,
+        formaPagamento: form.formaPagamento,
+        valor: total,
+        essencial: form.essencial,
+      }
 
-    const shouldParcel =
-      !editing && parcelas > 1 && isCreditCardPayment(form.formaPagamento)
+      const shouldParcel =
+        !editing && parcelas > 1 && isCreditCardPayment(form.formaPagamento)
 
-    if (shouldParcel && onSaveMany) {
-      const parcelaBase = Math.floor((total / parcelas) * 100) / 100
-      const items: DespesaVariavelInput[] = Array.from(
-        { length: parcelas },
-        (_, index) => {
-          const isLast = index === parcelas - 1
-          const valorParcela = isLast
-            ? Number(
+      if (shouldParcel && onSaveMany) {
+        const parcelaBase = Math.floor((total / parcelas) * 100) / 100
+        const items: DespesaVariavelInput[] = Array.from(
+          { length: parcelas },
+          (_, index) => {
+            const isLast = index === parcelas - 1
+            const valorParcela = isLast
+              ? Number(
                 (total - parcelaBase * (parcelas - 1)).toFixed(2),
               )
-            : parcelaBase
+              : parcelaBase
 
-          return {
-            ...payload,
-            data: addMonthsToDate(form.data, index),
-            descricao: `${form.descricao} (Parcela ${index + 1}/${parcelas})`,
-            valor: valorParcela,
-          }
-        },
-      )
+            return {
+              ...payload,
+              data: addMonthsToDate(form.data, index),
+              descricao: `${form.descricao} (Parcela ${index + 1}/${parcelas})`,
+              valor: valorParcela,
+            }
+          },
+        )
 
-      onSaveMany(items)
+        await onSaveMany(items)
+        setForm(defaultForm)
+        return
+      }
+
+      const saved = await saveSingleExpense(payload)
+      if (!saved) {
+        return
+      }
+
+      if (editing) {
+        onCancel?.()
+        return
+      }
+
       setForm(defaultForm)
+    } catch {
       return
+    } finally {
+      setIsSaving(false)
     }
-
-    onSave(payload)
-
-    if (editing) {
-      onCancel?.()
-      return
-    }
-
-    setForm(defaultForm)
   }
+
+  const handleVoiceCapture = useCallback(async () => {
+    if (isDisabled || editing) {
+      return
+    }
+
+    setVoiceError('')
+    setVoiceLoading(true)
+
+    try {
+      const permission = await SpeechRecognition.requestPermissions()
+      if (permission.speechRecognition !== 'granted') {
+        toast.error('Ative o microfone nas permissoes do app para usar voz.')
+        return
+      }
+
+      const transcript = await startExpenseSpeechRecognition()
+      const parsed = parseVoiceExpenseCommand(transcript)
+
+      if (!parsed) {
+        setVoiceError(
+          'Não consegui entender o valor e a descrição. Exemplo: "gastei 45 uber".',
+        )
+        return
+      }
+
+      // 🔥 aplica parcelas no form (caso detectado)
+      if (parsed.parcelas) {
+        setForm(prev => ({
+          ...prev,
+          parcelas: String(parsed.parcelas),
+        }))
+      }
+
+      const confidence = calculateVoiceConfidence(parsed)
+
+      // 🟢 Confiança alta → salva direto
+      if (confidence >= 5) {
+        const total = Number(parsed.valor) || 0
+        const parcelas = parsed.parcelas ?? 1
+
+        const isCredito =
+          parsed.formaPagamento &&
+          normalizePayment(parsed.formaPagamento).includes('credito')
+
+        const shouldParcel =
+          !editing && parcelas > 1 && isCredito
+
+        if (shouldParcel && onSaveMany) {
+          const parcelaBase = Math.floor((total / parcelas) * 100) / 100
+
+          const items: DespesaVariavelInput[] = Array.from(
+            { length: parcelas },
+            (_, index) => {
+              const isLast = index === parcelas - 1
+              const valorParcela = isLast
+                ? Number(
+                  (total - parcelaBase * (parcelas - 1)).toFixed(2),
+                )
+                : parcelaBase
+
+              return {
+                data: addMonthsToDate(
+                  parsed.data ?? formatDateInput(new Date()),
+                  index
+                ),
+                categoria: parsed.categoria,
+                descricao: `${parsed.descricao} (Parcela ${index + 1}/${parcelas})`,
+                formaPagamento: parsed.formaPagamento ?? '',
+                valor: valorParcela,
+                essencial: true,
+                perfil,
+              }
+            },
+          )
+
+          await onSaveMany(items)
+          toast.success('Despesa parcelada adicionada por voz ✅')
+          return
+        }
+
+        // caso não seja parcelado
+        const payload: DespesaVariavelInput = {
+          data: parsed.data ?? formatDateInput(new Date()),
+          categoria: parsed.categoria,
+          descricao: parsed.descricao,
+          formaPagamento: parsed.formaPagamento ?? '',
+          valor: parsed.valor,
+          essencial: true,
+          perfil,
+        }
+
+        const autoSaved = await saveSingleExpense(payload)
+
+        if (autoSaved) {
+          toast.success('Despesa adicionada por voz ✅')
+          return
+        }
+      }
+
+      // 🟡 Confiança média ou baixa → abre modal
+      setVoiceDraft(parsed)
+      setVoiceModalOpen(true)
+
+    } catch (error) {
+      setVoiceError(getSpeechExpenseErrorMessage(error))
+    } finally {
+      setVoiceLoading(false)
+    }
+  }, [editing, isDisabled, perfil])
+
+  useEffect(() => {
+    onVoiceLauncherReady?.(handleVoiceCapture)
+
+    return () => {
+      onVoiceLauncherReady?.(null)
+    }
+  }, [handleVoiceCapture, onVoiceLauncherReady])
 
   const showParcelasField =
     !editing && isCreditCardPayment(form.formaPagamento)
@@ -351,9 +513,21 @@ export function DespesasVariaveisForm({
       </div>
 
       <div className="flex flex-wrap gap-3">
+        {!editing && (
+          <button
+            type="button"
+            disabled={isDisabled || voiceLoading || isSaving}
+            title={fieldTitle}
+            onClick={handleVoiceCapture}
+            className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {voiceLoading ? 'Ouvindo...' : '🎙️ Lançar despesa por voz'}
+          </button>
+        )}
+
         <button
           type="submit"
-          disabled={isDisabled}
+          disabled={isSubmitDisabled}
           title={isDisabled ? 'Seu trial expirou' : undefined}
           className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-emerald-500"
         >
@@ -369,6 +543,77 @@ export function DespesasVariaveisForm({
           </button>
         )}
       </div>
+
+      {voiceError && (
+        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+          {voiceError}
+        </div>
+      )}
+
+      <VoiceExpenseConfirmModal
+        open={voiceModalOpen}
+        initialData={voiceDraft}
+        perfil={perfil}
+        onClose={() => {
+          setVoiceModalOpen(false)
+          setVoiceDraft(null)
+        }}
+        onConfirm={async payload => {
+          const total = payload.valor
+          const parcelas = voiceDraft?.parcelas ? Math.max(1, Math.floor(Number(voiceDraft.parcelas))) : 1
+
+          const shouldParcel =
+            !editing &&
+            parcelas > 1 &&
+            normalizePayment(payload.formaPagamento).includes('credito')
+
+          if (shouldParcel && onSaveMany) {
+            const parcelaBase = Math.floor((total / parcelas) * 100) / 100
+
+            const items: DespesaVariavelInput[] = Array.from(
+              { length: parcelas },
+              (_, index) => {
+                const isLast = index === parcelas - 1
+                const valorParcela = isLast
+                  ? Number(
+                    (total - parcelaBase * (parcelas - 1)).toFixed(2),
+                  )
+                  : parcelaBase
+
+                return {
+                  ...payload,
+                  data: addMonthsToDate(payload.data, index),
+                  descricao: `${payload.descricao} (Parcela ${index + 1}/${parcelas})`,
+                  valor: valorParcela,
+                }
+              },
+            )
+
+            await onSaveMany(items)
+
+            setVoiceModalOpen(false)
+            setVoiceDraft(null)
+            return true
+          }
+
+          const saved = await saveSingleExpense(payload)
+
+          if (!saved) {
+            setVoiceToast('Não foi possível salvar a despesa por voz')
+            return false
+          }
+
+          setVoiceModalOpen(false)
+          setVoiceDraft(null)
+          return true
+        }}
+      />
+
+      {voiceToast && (
+        <div className="fixed bottom-4 right-4 z-[60] rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-100 shadow-lg">
+          {voiceToast}
+        </div>
+      )}
     </form>
   )
 }
