@@ -50,7 +50,6 @@ import { UpdatePassword } from './pages/auth/UpdatePassword'
 
 import { isSameMonthYear, isSameYear, formatCurrency } from './utils/format'
 import { useLongPress } from './hooks/useLongPress'
-import DebugBilling from './pages/DebugBilling'
 import {
   SectionAccordion,
   type SectionAccordionItem,
@@ -862,7 +861,6 @@ export default function App() {
                 <Route path="/settings" element={<Settings />} />
 
                 <Route path="/update-password" element={<UpdatePassword />} />
-                <Route path="/debug-billing" element={<DebugBilling />} />
 
                 <Route
                   path="/admin/invites"

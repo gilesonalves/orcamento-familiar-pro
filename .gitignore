@@ -25,3 +25,14 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Android generated artifacts and local release inputs
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/local.properties
+android/keystore.properties
+android/app/google-services.json
+*.jks
+*.keystore

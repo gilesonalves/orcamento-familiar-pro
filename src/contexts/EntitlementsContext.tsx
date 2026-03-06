@@ -12,6 +12,7 @@ import { useAuth } from '../context/AuthContext'
 
 import {
   addCustomerInfoUpdateListener,
+  clearRevenueCatAppUser,
   ensureRevenueCatConfigured,
   getCustomerInfo,
   getCustomerInfoSummary,
@@ -26,6 +27,7 @@ import {
   removeCustomerInfoUpdateListener,
   resolveRevenueCatAppUserId,
   restorePurchases,
+  syncRevenueCatAppUser,
 } from '../services/revenuecat'
 
 type BillingTier = 'free' | 'pro'
@@ -59,7 +61,7 @@ type EntitlementsContextValue = {
 const EntitlementsContext = createContext<EntitlementsContextValue | null>(null)
 
 export function EntitlementsProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth() as any // mantenho como você está usando
+  const { user, loading: authLoading } = useAuth()
 
   const [paywallOpen, setPaywallOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -80,6 +82,7 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
   const listenerIdRef = useRef<string | null>(null)
 
   const appUserId = useMemo(() => {
+    if (!user) return null
     return resolveRevenueCatAppUserId({
       userId: user?.id ?? null,
       email: user?.email ?? null,
@@ -145,17 +148,29 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
       return
     }
 
+    if (authLoading) {
+      setLoading(true)
+      return
+    }
+
+    if (!user || !appUserId) {
+      setLoading(false)
+      setPackages({ monthly: null, annual: null })
+      clearCustomerSummary()
+      return
+    }
+
     setLoading(true)
     setError(null)
 
     try {
-      await ensureRevenueCatConfigured(appUserId)
+      const syncedCustomerInfo = await syncRevenueCatAppUser(appUserId)
 
       const offerings = await getOfferings()
       const nextPackages = extractPackages(offerings)
       setPackages(nextPackages)
 
-      const info = await getCustomerInfo()
+      const info = syncedCustomerInfo ?? (await getCustomerInfo())
       const summary = getCustomerInfoSummary(info, getRevenueCatEntitlementId())
       applyCustomerSummary(summary)
     } catch (e) {
@@ -176,10 +191,21 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appUserId, enabled])
+  }, [appUserId, authLoading, enabled, user])
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || authLoading || user) return
+
+    setPackages({ monthly: null, annual: null })
+    clearCustomerSummary()
+
+    void clearRevenueCatAppUser().catch(e => {
+      console.warn('[entitlements] logout sync failed', e)
+    })
+  }, [authLoading, enabled, user])
+
+  useEffect(() => {
+    if (!enabled || authLoading || !user || !appUserId) return
 
     let mounted = true
 
@@ -209,11 +235,16 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
         listenerIdRef.current = null
       }
     }
-  }, [appUserId, enabled])
+  }, [appUserId, authLoading, enabled, user])
 
   const purchase = async (kind: 'monthly' | 'annual') => {
     if (!enabled) {
       toast.error('Assinaturas indisponíveis neste ambiente.')
+      return
+    }
+
+    if (!appUserId) {
+      toast.error('Sessão indisponível. Faça login novamente.')
       return
     }
 
@@ -227,7 +258,7 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
     setError(null)
 
     try {
-      await ensureRevenueCatConfigured(appUserId)
+      await syncRevenueCatAppUser(appUserId)
 
       const result = await purchasePackage(pkg)
       const info = result.customerInfo
@@ -259,11 +290,16 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
       return
     }
 
+    if (!appUserId) {
+      toast.error('Sessão indisponível. Faça login novamente.')
+      return
+    }
+
     setProcessing(true)
     setError(null)
 
     try {
-      await ensureRevenueCatConfigured(appUserId)
+      await syncRevenueCatAppUser(appUserId)
 
       const info = await restorePurchases()
       const summary = getCustomerInfoSummary(info, getRevenueCatEntitlementId())
