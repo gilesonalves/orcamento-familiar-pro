@@ -1,5 +1,7 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Preferences } from '@capacitor/preferences'
 import { useBudget, type PerfilOrcamento } from '../context/BudgetContext'
+import { isNativeApp } from '../lib/platform'
 import { formatCurrency, isSameMonthYear } from '../utils/format'
 
 type Props = {
@@ -8,9 +10,18 @@ type Props = {
 }
 
 const monthLabels = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+const SUMMARY_YEAR_VIEW_MODE_KEY = 'summary_year_view_mode'
+type SummaryYearViewMode = 'cards' | 'table'
+
+const getDefaultViewMode = (): SummaryYearViewMode => {
+  if (typeof window === 'undefined') return 'cards'
+  return window.matchMedia('(min-width: 768px)').matches ? 'table' : 'cards'
+}
 
 export function SummaryYear({ year, perfil }: Props) {
   const { receitas, despesasFixas, despesasVariaveis } = useBudget()
+  const [viewMode, setViewMode] = useState<SummaryYearViewMode>(getDefaultViewMode)
+  const [viewModeLoaded, setViewModeLoaded] = useState(false)
 
   const {
     meses,
@@ -73,6 +84,77 @@ export function SummaryYear({ year, perfil }: Props) {
 
   const hasData = maxValor > 0
 
+  useEffect(() => {
+    let active = true
+
+    const loadViewMode = async () => {
+      try {
+        const isNative = isNativeApp()
+        let saved: string | null = null
+
+        if (isNative) {
+          const result = await Preferences.get({ key: SUMMARY_YEAR_VIEW_MODE_KEY })
+          saved = result.value
+        } else if (typeof window !== 'undefined') {
+          saved = window.localStorage.getItem(SUMMARY_YEAR_VIEW_MODE_KEY)
+        }
+
+        if (!active) return
+
+        if (saved === 'cards' || saved === 'table') {
+          setViewMode(saved)
+        } else {
+          setViewMode(getDefaultViewMode())
+        }
+      } catch {
+        if (!active) return
+        try {
+          const fallback = window.localStorage.getItem(SUMMARY_YEAR_VIEW_MODE_KEY)
+          if (fallback === 'cards' || fallback === 'table') {
+            setViewMode(fallback)
+          } else {
+            setViewMode(getDefaultViewMode())
+          }
+        } catch {
+          setViewMode(getDefaultViewMode())
+        }
+      } finally {
+        if (active) {
+          setViewModeLoaded(true)
+        }
+      }
+    }
+
+    void loadViewMode()
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!viewModeLoaded) return
+
+    const persistViewMode = async () => {
+      try {
+        const isNative = isNativeApp()
+        if (isNative) {
+          await Preferences.set({ key: SUMMARY_YEAR_VIEW_MODE_KEY, value: viewMode })
+        } else if (typeof window !== 'undefined') {
+          window.localStorage.setItem(SUMMARY_YEAR_VIEW_MODE_KEY, viewMode)
+        }
+      } catch {
+        try {
+          window.localStorage.setItem(SUMMARY_YEAR_VIEW_MODE_KEY, viewMode)
+        } catch {
+          // sem persistência disponível
+        }
+      }
+    }
+
+    void persistViewMode()
+  }, [viewMode, viewModeLoaded])
+
   return (
     <section className="space-y-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -83,6 +165,33 @@ export function SummaryYear({ year, perfil }: Props) {
           <h2 className="text-lg font-semibold text-white">
             {year}
           </h2>
+        </div>
+
+        <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900/80 p-1">
+          <button
+            type="button"
+            onClick={() => setViewMode('cards')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+              viewMode === 'cards'
+                ? 'bg-slate-700 text-slate-100'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            aria-pressed={viewMode === 'cards'}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('table')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+              viewMode === 'table'
+                ? 'bg-slate-700 text-slate-100'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            aria-pressed={viewMode === 'table'}
+          >
+            Tabela
+          </button>
         </div>
       </div>
 
@@ -118,54 +227,94 @@ export function SummaryYear({ year, perfil }: Props) {
         </div>
       </div>
 
-      {/* Tabela mês a mês */}
-      <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
-        <div className="grid grid-cols-4 gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-slate-400 sm:px-4">
-          <span>Mês</span>
-          <span className="text-right">Receitas</span>
-          <span className="text-right">Despesas</span>
-          <span className="text-right">Saldo</span>
-        </div>
-        <div className="max-h-64 overflow-y-auto text-xs sm:text-sm">
+      {viewMode === 'cards' ? (
+        <div className="grid gap-2">
           {meses.map(m => (
-            <div
+            <article
               key={m.label}
-              className="grid grid-cols-4 gap-2 border-b border-slate-800/60 px-3 py-2 last:border-b-0 sm:px-4"
+              className="rounded-2xl border border-slate-800 bg-slate-900/70 px-3 py-3"
             >
-              <span className="text-slate-200">{m.label}</span>
-              <span className="text-right text-slate-100">
-                {formatCurrency(m.receitas)}
-              </span>
-              <span className="text-right text-rose-200">
-                {formatCurrency(m.despesas)}
-              </span>
-              <span
-                className={`text-right ${
-                  m.saldo >= 0 ? 'text-emerald-300' : 'text-rose-300'
-                }`}
-              >
-                {formatCurrency(m.saldo)}
-              </span>
-            </div>
+              <p className="text-sm font-semibold text-slate-100">{m.label}</p>
+              <div className="mt-2 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Receitas</span>
+                  <span className="font-medium text-slate-100">
+                    {formatCurrency(m.receitas)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Despesas</span>
+                  <span className="font-medium text-rose-200">
+                    {formatCurrency(m.despesas)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3 border-t border-slate-800/80 pt-1.5">
+                  <span className="text-slate-300">Saldo</span>
+                  <span
+                    className={`font-semibold ${
+                      m.saldo >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                    }`}
+                  >
+                    {formatCurrency(m.saldo)}
+                  </span>
+                </div>
+              </div>
+            </article>
           ))}
         </div>
-        <div className="grid grid-cols-4 gap-2 border-t border-slate-800/80 bg-slate-900 px-3 py-2 text-xs font-semibold sm:px-4">
-          <span className="text-slate-300">Total {year}</span>
-          <span className="text-right text-slate-50">
-            {formatCurrency(totalReceitas)}
-          </span>
-          <span className="text-right text-rose-200">
-            {formatCurrency(totalDespesas)}
-          </span>
-          <span
-            className={`text-right ${
-              saldoAno >= 0 ? 'text-emerald-300' : 'text-rose-300'
-            }`}
-          >
-            {formatCurrency(saldoAno)}
-          </span>
+      ) : (
+        <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
+          <div className="overflow-x-auto">
+            <div className="min-w-[520px]">
+              <div className="grid grid-cols-4 gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-slate-400 sm:px-4">
+                <span>Mês</span>
+                <span className="text-right">Receitas</span>
+                <span className="text-right">Despesas</span>
+                <span className="text-right">Saldo</span>
+              </div>
+              <div className="max-h-64 overflow-y-auto text-xs sm:text-sm">
+                {meses.map(m => (
+                  <div
+                    key={m.label}
+                    className="grid grid-cols-4 gap-2 border-b border-slate-800/60 px-3 py-2 last:border-b-0 sm:px-4"
+                  >
+                    <span className="text-slate-200">{m.label}</span>
+                    <span className="text-right text-slate-100">
+                      {formatCurrency(m.receitas)}
+                    </span>
+                    <span className="text-right text-rose-200">
+                      {formatCurrency(m.despesas)}
+                    </span>
+                    <span
+                      className={`text-right ${
+                        m.saldo >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                      }`}
+                    >
+                      {formatCurrency(m.saldo)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-4 gap-2 border-t border-slate-800/80 bg-slate-900 px-3 py-2 text-xs font-semibold sm:px-4">
+                <span className="text-slate-300">Total {year}</span>
+                <span className="text-right text-slate-50">
+                  {formatCurrency(totalReceitas)}
+                </span>
+                <span className="text-right text-rose-200">
+                  {formatCurrency(totalDespesas)}
+                </span>
+                <span
+                  className={`text-right ${
+                    saldoAno >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                  }`}
+                >
+                  {formatCurrency(saldoAno)}
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Gráfico simples: duas barras por mês (Receitas x Despesas) */}
       <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-3 py-3 sm:px-4 sm:py-4">

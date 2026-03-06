@@ -93,7 +93,6 @@ const paymentKeywords: Record<string, string[]> = {
     'crédito',
     'cartao de credito',
     'cartao credito',
-    'cartao',
   ],
   'Cartão de débito': [
     'debito',
@@ -209,6 +208,14 @@ const suggestCategory = (normalizedText: string) => {
 }
 
 const detectPaymentMethod = (normalizedText: string): string | undefined => {
+  const hasCartao = /\bcartao\b/.test(normalizedText)
+  const hasCredito = /\bcredito\b/.test(normalizedText)
+  const hasDebito = /\bdebito\b/.test(normalizedText)
+
+  if ((hasCartao && hasCredito) || hasCredito || (hasCartao && !hasDebito)) {
+    return 'Cartão de crédito'
+  }
+
   const words = normalizedText.split(/\s+/)
 
   for (const word of words) {
@@ -234,7 +241,7 @@ const detectPaymentMethod = (normalizedText: string): string | undefined => {
 const detectInstallments = (normalizedText: string): number | undefined => {
   // número digitado
   const digitMatch = normalizedText.match(
-    /\b(?:em\s+)?(\d{1,2})\s*(x|vezes)\b/
+    /\b(?:em\s+)?(\d{1,2})\s*(x|vez|vezes)\b/
   )
 
   if (digitMatch) {

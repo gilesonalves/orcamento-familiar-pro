@@ -65,7 +65,7 @@ export function UpdatePassword() {
     await supabase.auth.signOut()
     setSaving(false)
     setTimeout(() => {
-      navigate('/home', { replace: true })
+      navigate('/', { replace: true })
     }, 1200)
   }
 

@@ -3,66 +3,74 @@ import { Browser } from '@capacitor/browser'
 import { supabase } from './lib/supabaseClient'
 import { isNativeApp } from './lib/platform'
 
-function setupMobileAuthListener() {
-  if (!isNativeApp()) {
-    return
-  }
+async function handleIncomingUrl(url?: string) {
+  try {
+    if (!url) return
 
-  App.addListener('appUrlOpen', async ({ url }) => {
-    try {
-      if (!url) return
+    if (
+      !url.startsWith('gestorfamiliar://auth-callback') &&
+      !url.startsWith('gestorfamiliar://update-password')
+    ) {
+      return
+    }
 
-      // Exemplo de URL: gestorfamiliar://auth-callback?code=XXX&state=YYY
-      if (!url.startsWith('gestorfamiliar://auth-callback')) {
+    await Browser.close().catch(() => {})
+
+    const parsed = new URL(url)
+    const code = parsed.searchParams.get('code')
+
+    if (code) {
+      const { error } = await supabase.auth.exchangeCodeForSession(code)
+      if (error) {
+        console.error('[deep link] exchangeCodeForSession:', error)
         return
       }
 
-      // Fecha o navegador externo
-      await Browser.close()
-
-      const parsed = new URL(url)
-      const code = parsed.searchParams.get('code')
-
-      // Troca o code pela sessão do usuário no Supabase
-      if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(code)
-
-        if (error) {
-          console.error('[appUrlOpen] Erro ao trocar code por sessão:', error)
-          return
-        }
-
-        // Não precisa fazer mais nada aqui: o onAuthStateChange do AuthWrapper
-        // já vai atualizar a UI quando a sessão mudar.
-        return
+      if (url.startsWith('gestorfamiliar://update-password')) {
+        window.location.replace('/update-password')
       }
+      return
+    }
 
-      const hash = parsed.hash ? parsed.hash : ''
-      if (!hash) {
-        return
-      }
+    const fragment = parsed.hash.startsWith('#')
+      ? parsed.hash.slice(1)
+      : parsed.hash
 
-      const fragment = hash.startsWith('#') ? hash.slice(1) : hash
+    if (fragment) {
       const params = new URLSearchParams(fragment)
       const accessToken = params.get('access_token')
       const refreshToken = params.get('refresh_token')
 
-      if (!accessToken || !refreshToken) {
-        return
-      }
+      if (accessToken && refreshToken) {
+        const { error } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        })
 
-      const { error } = await supabase.auth.setSession({
-        access_token: accessToken,
-        refresh_token: refreshToken,
-      })
-
-      if (error) {
-        console.error('[appUrlOpen] Erro ao criar sessão via fragmento OAuth:', error)
-        return
+        if (error) {
+          console.error('[deep link] setSession:', error)
+          return
+        }
       }
-    } catch {
-      console.error('Erro no listener appUrlOpen.')
     }
+
+    if (url.startsWith('gestorfamiliar://update-password')) {
+      window.location.replace('/update-password')
+    }
+  } catch (err) {
+    console.error('[deep link] erro:', err)
+  }
+}
+
+function setupMobileAuthListener() {
+  if (!isNativeApp()) return
+
+  App.addListener('appUrlOpen', async ({ url }) => {
+    await handleIncomingUrl(url)
+  })
+
+  App.getLaunchUrl().then((launchUrl) => {
+    if (launchUrl?.url) handleIncomingUrl(launchUrl.url)
   })
 }
 

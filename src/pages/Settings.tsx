@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useBudget } from '../context/BudgetContext'
 import { useEntitlements } from '../hooks/useEntitlements'
@@ -8,6 +8,12 @@ import {
   copyBudgetExportToClipboard,
   downloadBudgetExport,
 } from '../services/budgetExport'
+import {
+  DEFAULT_CREDIT_CARD_CLOSING_DAY,
+  DEFAULT_CREDIT_CARD_DUE_DAY,
+  loadCreditCardConfig,
+  saveCreditCardConfig,
+} from '../utils/creditCardConfig'
 
 export const Settings = () => {
   const { receitas, despesasFixas, despesasVariaveis } = useBudget()
@@ -36,6 +42,35 @@ export const Settings = () => {
 
   const monthlyTerm = monthly?.product?.subscriptionPeriod || 'Cobrança mensal'
   const annualTerm = annual?.product?.subscriptionPeriod || 'Cobrança anual'
+  const [closingDayInput, setClosingDayInput] = useState(
+    String(DEFAULT_CREDIT_CARD_CLOSING_DAY),
+  )
+  const [dueDayInput, setDueDayInput] = useState(
+    String(DEFAULT_CREDIT_CARD_DUE_DAY),
+  )
+  const [creditCardConfigLoading, setCreditCardConfigLoading] = useState(true)
+  const [creditCardConfigSaving, setCreditCardConfigSaving] = useState(false)
+  const [creditCardFeedback, setCreditCardFeedback] = useState<string | null>(
+    null,
+  )
+
+  useEffect(() => {
+    let active = true
+
+    const loadConfig = async () => {
+      const config = await loadCreditCardConfig()
+      if (!active) return
+      setClosingDayInput(String(config.closingDay))
+      setDueDayInput(String(config.dueDay))
+      setCreditCardConfigLoading(false)
+    }
+
+    void loadConfig()
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   const handleDownload = () => {
     try {
@@ -54,6 +89,24 @@ export const Settings = () => {
     } catch (error) {
       console.error('Erro ao copiar exportacao', error)
       setFeedback('Não foi possível copiar os dados.')
+    }
+  }
+
+  const handleSaveCreditCardConfig = async () => {
+    setCreditCardConfigSaving(true)
+    setCreditCardFeedback(null)
+    try {
+      const saved = await saveCreditCardConfig({
+        closingDay: Number(closingDayInput),
+        dueDay: Number(dueDayInput),
+      })
+      setClosingDayInput(String(saved.closingDay))
+      setDueDayInput(String(saved.dueDay))
+      setCreditCardFeedback('Configuração do cartão salva com sucesso.')
+    } catch {
+      setCreditCardFeedback('Não foi possível salvar a configuração do cartão.')
+    } finally {
+      setCreditCardConfigSaving(false)
     }
   }
 
@@ -169,6 +222,66 @@ export const Settings = () => {
             >
               Atualizar status
             </button>
+          </div>
+        </section>
+
+        <section className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/40 p-5">
+          <div className="space-y-2">
+            <h2 className="text-lg font-semibold text-white">Cartão de crédito</h2>
+            <p className="text-sm text-slate-300">
+              Defina o ciclo para lançar despesas variáveis no mês correto da
+              fatura.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-sm text-slate-100">
+              Dia de fechamento (1-28)
+              <input
+                type="number"
+                min={1}
+                max={28}
+                step={1}
+                required
+                value={closingDayInput}
+                onChange={event => setClosingDayInput(event.target.value)}
+                disabled={creditCardConfigLoading || creditCardConfigSaving}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-50 shadow-inner focus:border-emerald-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
+
+            <label className="text-sm text-slate-100">
+              Dia de vencimento (1-28)
+              <input
+                type="number"
+                min={1}
+                max={28}
+                step={1}
+                required
+                value={dueDayInput}
+                onChange={event => setDueDayInput(event.target.value)}
+                disabled={creditCardConfigLoading || creditCardConfigSaving}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-50 shadow-inner focus:border-emerald-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                void handleSaveCreditCardConfig()
+              }}
+              disabled={creditCardConfigLoading || creditCardConfigSaving}
+              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {creditCardConfigSaving ? 'Salvando...' : 'Salvar ciclo do cartão'}
+            </button>
+            {creditCardFeedback && (
+              <p className="text-sm text-emerald-200" role="status">
+                {creditCardFeedback}
+              </p>
+            )}
           </div>
         </section>
 

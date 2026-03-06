@@ -1,4 +1,4 @@
-const TRIAL_DURATION_DAYS = 30
+const TRIAL_DURATION_DAYS = 15
 
 const parseDate = (value: string | null | undefined) => {
   if (!value) return null

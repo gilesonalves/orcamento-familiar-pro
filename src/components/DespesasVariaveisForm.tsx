@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { SpeechRecognition } from '@capacitor-community/speech-recognition'
-import { toast } from 'sonner'
+import toast from 'react-hot-toast'
+import { useEntitlements } from '../hooks/useEntitlements'
 import {
   useBudget,
   type DespesaVariavel,
   type DespesaVariavelInput,
   type PerfilOrcamento,
 } from '../context/BudgetContext'
-import { useAuth } from '../context/AuthContext'
+
 import { VoiceExpenseConfirmModal } from './VoiceExpenseConfirmModal'
 import { parseVoiceExpenseCommand, type ParsedVoiceExpense } from '../utils/voiceExpenseParser'
 import {
@@ -16,6 +17,13 @@ import {
   startExpenseSpeechRecognition,
 } from '../services/speechRecognition'
 import { calculateVoiceConfidence } from '../utils/voiceExpenseParser'
+import { getInstallmentDueDates } from '../utils/creditCardCycle'
+import {
+  DEFAULT_CREDIT_CARD_CLOSING_DAY,
+  DEFAULT_CREDIT_CARD_DUE_DAY,
+  loadCreditCardConfig,
+  type CreditCardConfig,
+} from '../utils/creditCardConfig'
 type Props = {
   onSave: (data: DespesaVariavelInput) => Promise<boolean>
   onSaveMany?: (items: DespesaVariavelInput[]) => Promise<void>
@@ -102,10 +110,9 @@ const isCreditCardPayment = (value: string) => {
 
   // fallback para dados antigos digitados à mão
   const normalized = normalizePayment(value)
-  return (
-    normalized.includes('cartao') &&
-    normalized.includes('credito')
-  )
+  if (normalized.includes('debito')) return false
+  if (normalized.includes('credito')) return true
+  return normalized.includes('cartao')
 }
 
 const parseInputDate = (value: string) => {
@@ -126,15 +133,24 @@ const formatDateInput = (date: Date) => {
   return `${yyyy}-${mm}-${dd}`
 }
 
-const addMonthsToDate = (dateString: string, offset: number) => {
-  const date = parseInputDate(dateString)
-  if (!date) return dateString
-  const result = new Date(
-    date.getFullYear(),
-    date.getMonth() + offset,
-    date.getDate(),
-  )
-  return formatDateInput(result)
+const createInstallmentGroupId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  const randomPart = Math.random().toString(36).slice(2, 10)
+  return `installment_${Date.now()}_${randomPart}`
+}
+
+const splitInstallmentValues = (total: number, installments: number) => {
+  const parcelaBase = Math.floor((total / installments) * 100) / 100
+
+  return Array.from({ length: installments }, (_, index) => {
+    const isLast = index === installments - 1
+    return isLast
+      ? Number((total - parcelaBase * (installments - 1)).toFixed(2))
+      : parcelaBase
+  })
 }
 
 export function DespesasVariaveisForm({
@@ -147,7 +163,7 @@ export function DespesasVariaveisForm({
   onVoiceLauncherReady,
 }: Props) {
   const { trialActive } = useBudget()
-  const { isPro } = useAuth()
+  const { isPro } = useEntitlements()
   const [form, setForm] = useState<DespesaVariavelFormState>(defaultForm)
   const [voiceError, setVoiceError] = useState('')
   const [voiceLoading, setVoiceLoading] = useState(false)
@@ -155,9 +171,29 @@ export function DespesasVariaveisForm({
   const [voiceDraft, setVoiceDraft] = useState<ParsedVoiceExpense | null>(null)
   const [voiceToast, setVoiceToast] = useState('')
   const [isSaving, setIsSaving] = useState(false)
+  const [creditCardConfig, setCreditCardConfig] = useState<CreditCardConfig>({
+    closingDay: DEFAULT_CREDIT_CARD_CLOSING_DAY,
+    dueDay: DEFAULT_CREDIT_CARD_DUE_DAY,
+  })
   const isDisabled = disabled ?? (!trialActive && !isPro)
   const isSubmitDisabled = isDisabled || isSaving
   const fieldTitle = isDisabled ? 'Seu trial expirou' : undefined
+
+  useEffect(() => {
+    let active = true
+
+    const loadConfig = async () => {
+      const config = await loadCreditCardConfig()
+      if (!active) return
+      setCreditCardConfig(config)
+    }
+
+    void loadConfig()
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   useEffect(() => {
     if (editing) {
@@ -189,6 +225,45 @@ export function DespesasVariaveisForm({
     return saved
   }
 
+  const buildCreditCardInstallments = (
+    payload: DespesaVariavelInput,
+    installments: number,
+  ): DespesaVariavelInput[] => {
+    const purchaseDate = parseInputDate(payload.data) ?? new Date()
+    const purchaseDateString = formatDateInput(purchaseDate)
+    const totalInstallments = Math.max(1, Math.floor(installments))
+    const dueDates = getInstallmentDueDates(
+      purchaseDate,
+      creditCardConfig.closingDay,
+      creditCardConfig.dueDay,
+      totalInstallments,
+    )
+    const installmentValues = splitInstallmentValues(payload.valor, totalInstallments)
+    const installmentGroupId =
+      totalInstallments > 1 ? createInstallmentGroupId() : undefined
+
+    return dueDates.map((dueDate, index) => {
+      const nextPayload: DespesaVariavelInput = {
+        ...payload,
+        data: formatDateInput(dueDate),
+        purchaseDate: purchaseDateString,
+        descricao:
+          totalInstallments > 1
+            ? `${payload.descricao} (${index + 1}/${totalInstallments})`
+            : payload.descricao,
+        valor: installmentValues[index],
+      }
+
+      if (installmentGroupId) {
+        nextPayload.installmentGroupId = installmentGroupId
+        nextPayload.installmentIndex = index + 1
+        nextPayload.installmentTotal = totalInstallments
+      }
+
+      return nextPayload
+    })
+  }
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
     if (isSubmitDisabled) {
@@ -208,31 +283,28 @@ export function DespesasVariaveisForm({
         essencial: form.essencial,
       }
 
-      const shouldParcel =
-        !editing && parcelas > 1 && isCreditCardPayment(form.formaPagamento)
-
-      if (shouldParcel && onSaveMany) {
-        const parcelaBase = Math.floor((total / parcelas) * 100) / 100
-        const items: DespesaVariavelInput[] = Array.from(
-          { length: parcelas },
-          (_, index) => {
-            const isLast = index === parcelas - 1
-            const valorParcela = isLast
-              ? Number(
-                (total - parcelaBase * (parcelas - 1)).toFixed(2),
-              )
-              : parcelaBase
-
-            return {
-              ...payload,
-              data: addMonthsToDate(form.data, index),
-              descricao: `${form.descricao} (Parcela ${index + 1}/${parcelas})`,
-              valor: valorParcela,
+      if (!editing && isCreditCardPayment(form.formaPagamento)) {
+        const items = buildCreditCardInstallments(payload, parcelas)
+        if (items.length > 1) {
+          if (onSaveMany) {
+            await onSaveMany(items)
+          } else {
+            for (const item of items) {
+              const saved = await saveSingleExpense(item)
+              if (!saved) {
+                return
+              }
             }
-          },
-        )
+          }
+          setForm(defaultForm)
+          return
+        }
 
-        await onSaveMany(items)
+        const saved = await saveSingleExpense(items[0])
+        if (!saved) {
+          return
+        }
+
         setForm(defaultForm)
         return
       }
@@ -295,44 +367,43 @@ export function DespesasVariaveisForm({
         const total = Number(parsed.valor) || 0
         const parcelas = parsed.parcelas ?? 1
 
-        const isCredito =
-          parsed.formaPagamento &&
-          normalizePayment(parsed.formaPagamento).includes('credito')
+        const paymentMethod = parsed.formaPagamento ?? ''
+        const isCredito = isCreditCardPayment(paymentMethod)
 
-        const shouldParcel =
-          !editing && parcelas > 1 && isCredito
-
-        if (shouldParcel && onSaveMany) {
-          const parcelaBase = Math.floor((total / parcelas) * 100) / 100
-
-          const items: DespesaVariavelInput[] = Array.from(
-            { length: parcelas },
-            (_, index) => {
-              const isLast = index === parcelas - 1
-              const valorParcela = isLast
-                ? Number(
-                  (total - parcelaBase * (parcelas - 1)).toFixed(2),
-                )
-                : parcelaBase
-
-              return {
-                data: addMonthsToDate(
-                  parsed.data ?? formatDateInput(new Date()),
-                  index
-                ),
-                categoria: parsed.categoria,
-                descricao: `${parsed.descricao} (Parcela ${index + 1}/${parcelas})`,
-                formaPagamento: parsed.formaPagamento ?? '',
-                valor: valorParcela,
-                essencial: true,
-                perfil,
-              }
+        if (!editing && isCredito) {
+          const items = buildCreditCardInstallments(
+            {
+              data: parsed.data ?? formatDateInput(new Date()),
+              categoria: parsed.categoria,
+              descricao: parsed.descricao,
+              formaPagamento: paymentMethod,
+              valor: total,
+              essencial: true,
+              perfil,
             },
+            parcelas,
           )
 
-          await onSaveMany(items)
-          toast.success('Despesa parcelada adicionada por voz ✅')
-          return
+          if (items.length > 1) {
+            if (onSaveMany) {
+              await onSaveMany(items)
+            } else {
+              for (const item of items) {
+                const saved = await saveSingleExpense(item)
+                if (!saved) {
+                  return
+                }
+              }
+            }
+            toast.success('Despesa parcelada adicionada por voz ✅')
+            return
+          }
+
+          const autoSaved = await saveSingleExpense(items[0])
+          if (autoSaved) {
+            toast.success('Despesa adicionada por voz ✅')
+            return
+          }
         }
 
         // caso não seja parcelado
@@ -363,7 +434,14 @@ export function DespesasVariaveisForm({
     } finally {
       setVoiceLoading(false)
     }
-  }, [editing, isDisabled, perfil])
+  }, [
+    buildCreditCardInstallments,
+    editing,
+    isDisabled,
+    onSaveMany,
+    perfil,
+    saveSingleExpense,
+  ])
 
   useEffect(() => {
     onVoiceLauncherReady?.(handleVoiceCapture)
@@ -559,37 +637,35 @@ export function DespesasVariaveisForm({
           setVoiceDraft(null)
         }}
         onConfirm={async payload => {
-          const total = payload.valor
-          const parcelas = voiceDraft?.parcelas ? Math.max(1, Math.floor(Number(voiceDraft.parcelas))) : 1
+          const parcelas = voiceDraft?.parcelas
+            ? Math.max(1, Math.floor(Number(voiceDraft.parcelas)))
+            : 1
 
-          const shouldParcel =
-            !editing &&
-            parcelas > 1 &&
-            normalizePayment(payload.formaPagamento).includes('credito')
+          if (!editing && isCreditCardPayment(payload.formaPagamento)) {
+            const items = buildCreditCardInstallments(payload, parcelas)
 
-          if (shouldParcel && onSaveMany) {
-            const parcelaBase = Math.floor((total / parcelas) * 100) / 100
-
-            const items: DespesaVariavelInput[] = Array.from(
-              { length: parcelas },
-              (_, index) => {
-                const isLast = index === parcelas - 1
-                const valorParcela = isLast
-                  ? Number(
-                    (total - parcelaBase * (parcelas - 1)).toFixed(2),
-                  )
-                  : parcelaBase
-
-                return {
-                  ...payload,
-                  data: addMonthsToDate(payload.data, index),
-                  descricao: `${payload.descricao} (Parcela ${index + 1}/${parcelas})`,
-                  valor: valorParcela,
+            if (items.length > 1) {
+              if (onSaveMany) {
+                await onSaveMany(items)
+              } else {
+                for (const item of items) {
+                  const saved = await saveSingleExpense(item)
+                  if (!saved) {
+                    setVoiceToast('Não foi possível salvar a despesa por voz')
+                    return false
+                  }
                 }
-              },
-            )
+              }
+              setVoiceModalOpen(false)
+              setVoiceDraft(null)
+              return true
+            }
 
-            await onSaveMany(items)
+            const singleSaved = await saveSingleExpense(items[0])
+            if (!singleSaved) {
+              setVoiceToast('Não foi possível salvar a despesa por voz')
+              return false
+            }
 
             setVoiceModalOpen(false)
             setVoiceDraft(null)

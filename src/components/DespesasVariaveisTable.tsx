@@ -55,6 +55,11 @@ export function DespesasVariaveisTable({
           {filtered.map(item => {
             const isOpen = openId === item.id
             const isEssencial = item.essencial
+            const hasInstallmentInfo =
+              Boolean(item.installmentTotal) && Boolean(item.installmentIndex)
+            const installmentLabel = hasInstallmentInfo
+              ? `Cartão ${item.installmentIndex}/${item.installmentTotal}`
+              : null
 
             const borderClass = isEssencial
               ? 'border-emerald-500/60'
@@ -81,6 +86,11 @@ export function DespesasVariaveisTable({
                     <span className="text-[11px] text-slate-400 line-clamp-1">
                       {item.descricao}
                     </span>
+                    {installmentLabel && (
+                      <span className="mt-1 inline-flex w-fit items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-[1px] text-[10px] font-semibold text-emerald-200">
+                        {installmentLabel}
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-col items-end">
                     <span className="text-xs text-slate-500">Valor</span>
@@ -119,6 +129,15 @@ export function DespesasVariaveisTable({
                         </span>
                         <span>{item.formaPagamento}</span>
                       </div>
+
+                      {item.purchaseDate && (
+                        <div>
+                          <span className="block text-[11px] text-slate-500">
+                            Data da compra
+                          </span>
+                          <span>{formatDate(item.purchaseDate)}</span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-2">
@@ -173,43 +192,67 @@ export function DespesasVariaveisTable({
               </tr>
             )}
             {filtered.map(item => (
-              <tr
-                key={item.id}
-                className={`border-t border-slate-800 ${
-                  item.essencial
-                    ? 'text-slate-100'
-                    : 'bg-amber-50/5 text-amber-200'
-                }`}
-              >
-                <td className="px-4 py-2">{formatDate(item.data)}</td>
-                <td className="px-4 py-2">{item.categoria}</td>
-                <td className="px-4 py-2">{item.descricao}</td>
-                <td className="px-4 py-2">{item.formaPagamento}</td>
-                <td className="px-4 py-2">{formatCurrency(item.valor)}</td>
-                <td className="px-4 py-2">
-                  {item.essencial ? 'Sim' : 'Não (não essencial)'}
-                </td>
-                <td className="px-4 py-2 text-right">
-                  <div className="flex justify-end gap-2">
-                    <button
-                      onClick={() => onEdit(item)}
-                      disabled={isDisabled}
-                      title={actionTitle}
-                      className="rounded-md px-3 py-1 text-xs font-semibold text-emerald-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Editar
-                    </button>
-                    <button
-                      onClick={() => onDelete(item.id)}
-                      disabled={isDisabled}
-                      title={actionTitle}
-                      className="rounded-md px-3 py-1 text-xs font-semibold text-rose-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Excluir
-                    </button>
-                  </div>
-                </td>
-              </tr>
+              (() => {
+                const hasInstallmentInfo =
+                  Boolean(item.installmentTotal) && Boolean(item.installmentIndex)
+                const installmentLabel = hasInstallmentInfo
+                  ? `Cartão ${item.installmentIndex}/${item.installmentTotal}`
+                  : null
+
+                return (
+                  <tr
+                    key={item.id}
+                    className={`border-t border-slate-800 ${
+                      item.essencial
+                        ? 'text-slate-100'
+                        : 'bg-amber-50/5 text-amber-200'
+                    }`}
+                  >
+                    <td className="px-4 py-2">{formatDate(item.data)}</td>
+                    <td className="px-4 py-2">{item.categoria}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-col">
+                        <span>{item.descricao}</span>
+                        {installmentLabel && (
+                          <span className="mt-1 inline-flex w-fit items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-[1px] text-[10px] font-semibold text-emerald-200">
+                            {installmentLabel}
+                          </span>
+                        )}
+                        {item.purchaseDate && (
+                          <span className="mt-1 text-[11px] text-slate-400">
+                            Compra: {formatDate(item.purchaseDate)}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">{item.formaPagamento}</td>
+                    <td className="px-4 py-2">{formatCurrency(item.valor)}</td>
+                    <td className="px-4 py-2">
+                      {item.essencial ? 'Sim' : 'Não (não essencial)'}
+                    </td>
+                    <td className="px-4 py-2 text-right">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => onEdit(item)}
+                          disabled={isDisabled}
+                          title={actionTitle}
+                          className="rounded-md px-3 py-1 text-xs font-semibold text-emerald-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          onClick={() => onDelete(item.id)}
+                          disabled={isDisabled}
+                          title={actionTitle}
+                          className="rounded-md px-3 py-1 text-xs font-semibold text-rose-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Excluir
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })()
             ))}
           </tbody>
         </table>
