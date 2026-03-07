@@ -21,6 +21,7 @@ const defaultForm: ReceitaFormState = {
   fonte: '',
   tipo: 'Fixa',
   valor: '',
+  recorrente: false,
 }
 
 const receitaSugestoes = [
@@ -67,6 +68,7 @@ export function ReceitasForm({ onSave, editing, onCancel, disabled }: Props) {
         fonte: editing.fonte,
         tipo: editing.tipo,
         valor: String(editing.valor ?? ''),
+        recorrente: editing.recorrente,
       })
     } else {
       setForm(defaultForm)
@@ -156,6 +158,22 @@ export function ReceitasForm({ onSave, editing, onCancel, disabled }: Props) {
             className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-50 shadow-inner focus:border-emerald-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
           />
         </label>
+        <label className="flex items-center gap-2 text-sm text-slate-100 md:col-span-2">
+          <input
+            type="checkbox"
+            checked={form.recorrente}
+            onChange={e => setForm({ ...form, recorrente: e.target.checked })}
+            disabled={isDisabled}
+            title={fieldTitle}
+            className="h-4 w-4 rounded border-slate-700 bg-slate-800 text-emerald-500 focus:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+          />
+          Repetir automaticamente nos próximos meses
+        </label>
+        {form.recorrente && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100 md:col-span-2">
+            Esta receita será repetida automaticamente nos próximos meses.
+          </div>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-3">

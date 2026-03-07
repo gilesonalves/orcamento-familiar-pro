@@ -504,6 +504,41 @@ function Dashboard() {
     addDespesaFixa,
   ])
 
+  // replica receitas recorrentes se mês vazio
+  useEffect(() => {
+    if (receitasFiltradas.length > 0) return
+
+    const prevMonth = selectedMonth === 0 ? 11 : selectedMonth - 1
+    const prevYear = selectedMonth === 0 ? selectedYear - 1 : selectedYear
+
+    const recorrentesDoMesAnterior = receitas.filter(
+      r =>
+        r.perfil === perfil &&
+        r.recorrente &&
+        isSameMonthYear(r.data, prevMonth, prevYear),
+    )
+
+    if (recorrentesDoMesAnterior.length === 0) return
+
+    recorrentesDoMesAnterior.forEach(r => {
+      void addReceita({
+        data: moveDateToMonthYear(r.data, selectedMonth, selectedYear),
+        fonte: r.fonte,
+        tipo: r.tipo,
+        valor: r.valor,
+        recorrente: true,
+        perfil: r.perfil,
+      })
+    })
+  }, [
+    receitas,
+    receitasFiltradas.length,
+    selectedMonth,
+    selectedYear,
+    perfil,
+    addReceita,
+  ])
+
   const annualAccordionSections = useMemo<SectionAccordionItem[]>(
     () => [
       {

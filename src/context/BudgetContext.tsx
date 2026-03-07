@@ -23,6 +23,7 @@ export type Receita = {
   fonte: string
   tipo: 'Fixa' | 'Variável'
   valor: number
+  recorrente: boolean
   perfil: PerfilOrcamento
 }
 
@@ -192,6 +193,7 @@ const mapReceitaRow = (row: Row | null): Receita => ({
   fonte: String(row?.fonte ?? ''),
   tipo: row?.tipo === 'Fixa' ? 'Fixa' : 'Variável',
   valor: parseNumber(row?.valor),
+  recorrente: Boolean(row?.recorrente),
   perfil: asPerfil(row?.perfil),
 })
 
@@ -504,6 +506,7 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
             fonte: input.fonte,
             tipo: input.tipo,
             valor: input.valor,
+            recorrente: Boolean(input.recorrente),
             perfil,
           },
         ])
@@ -535,6 +538,7 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
           fonte: input.fonte,
           tipo: input.tipo,
           valor: input.valor,
+          recorrente: Boolean(input.recorrente),
           perfil,
         })
         .eq('id', id)
