@@ -1,8 +1,30 @@
 apply plugin: 'com.android.application'
 
+def releaseSigningProps = [
+    'ORCAMENTO_RELEASE_STORE_FILE',
+    'ORCAMENTO_RELEASE_STORE_PASSWORD',
+    'ORCAMENTO_RELEASE_KEY_ALIAS',
+    'ORCAMENTO_RELEASE_KEY_PASSWORD',
+]
+
+def hasReleaseSigning = releaseSigningProps.every { key ->
+    def value = project.findProperty(key)
+    value != null && value.toString().trim()
+}
+
 android {
     namespace "com.gileson.orcamento"
     compileSdk rootProject.ext.compileSdkVersion
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(project.property('ORCAMENTO_RELEASE_STORE_FILE'))
+                storePassword project.property('ORCAMENTO_RELEASE_STORE_PASSWORD')
+                keyAlias project.property('ORCAMENTO_RELEASE_KEY_ALIAS')
+                keyPassword project.property('ORCAMENTO_RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
     defaultConfig {
         applicationId "com.gileson.orcamento"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -20,7 +42,9 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
@@ -52,4 +76,8 @@ try {
     }
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
+
+if (!hasReleaseSigning) {
+    logger.lifecycle("Release signing is not configured. Provide ORCAMENTO_RELEASE_* Gradle properties or sign the artifact outside the repository before publication.")
 }

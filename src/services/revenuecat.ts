@@ -196,6 +196,50 @@ export const ensureRevenueCatConfigured = (appUserId?: string | null) => {
 }
 
 // Compat: mantém seu nome antigo (se já usado)
+export const isRevenueCatConfigured = async () => {
+  if (!Capacitor.isNativePlatform() || !API_KEY) return false
+  const result = await Purchases.isConfigured()
+  return Boolean(result.isConfigured)
+}
+
+export const getConfiguredRevenueCatAppUserId = async () => {
+  if (!(await isRevenueCatConfigured())) return null
+  const result = await Purchases.getAppUserID()
+  return result.appUserID || null
+}
+
+export const syncRevenueCatAppUser = async (appUserId: string) => {
+  if (!Capacitor.isNativePlatform() || !API_KEY) return null
+
+  await ensureRevenueCatConfigured(appUserId)
+
+  const currentAppUserId = await getConfiguredRevenueCatAppUserId()
+if (currentAppUserId === appUserId) {
+  return null
+}
+
+  const result = await Purchases.logIn({ appUserID: appUserId })
+  if (import.meta.env.DEV) {
+    console.log('[revenuecat] synced appUserID', {
+      from: currentAppUserId,
+      to: appUserId,
+      created: result.created,
+    })
+  }
+  return result.customerInfo
+}
+
+export const clearRevenueCatAppUser = async () => {
+  if (!Capacitor.isNativePlatform() || !API_KEY) return null
+  if (!(await isRevenueCatConfigured())) return null
+
+  const result = await Purchases.logOut()
+  if (import.meta.env.DEV) {
+    console.log('[revenuecat] cleared appUserID')
+  }
+  return result.customerInfo
+}
+
 export const initRevenueCat = async (appUserId?: string | null) =>
   ensureRevenueCatConfigured(appUserId)
 
