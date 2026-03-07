@@ -24,6 +24,9 @@ export type Receita = {
   tipo: 'Fixa' | 'Variável'
   valor: number
   recorrente: boolean
+  recurringGroupId?: string
+  recurrenceEndsAt?: string
+  skipMonths?: string[]
   perfil: PerfilOrcamento
 }
 
@@ -84,8 +87,9 @@ type BudgetState = {
 
 type BudgetContextValue = BudgetState & {
   addReceita: (input: ReceitaInput) => Promise<void>
-  updateReceita: (id: string, input: ReceitaInput) => Promise<void>
-  deleteReceita: (id: string) => Promise<void>
+  replicateReceita: (input: ReceitaInput) => Promise<Receita | null>
+  updateReceita: (id: string, input: ReceitaInput) => Promise<boolean>
+  deleteReceita: (id: string) => Promise<boolean>
 
   addDespesaFixa: (input: DespesaFixaInput) => Promise<void>
   updateDespesaFixa: (id: string, input: DespesaFixaInput) => Promise<void>
@@ -166,6 +170,45 @@ const normalizeOptionalString = (value: unknown) => {
   return trimmed || undefined
 }
 
+const normalizeStringArray = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean)
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return []
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map(item => (typeof item === 'string' ? item.trim() : ''))
+          .filter(Boolean)
+      }
+    } catch {
+      // ignore
+    }
+
+    return [trimmed]
+  }
+
+  return []
+}
+
+const RECURRING_RECEITAS_DEBUG =
+  import.meta.env.DEV || import.meta.env.VITE_DEBUG_RECURRING_RECEITAS === '1'
+
+const logRecurringReceitaPersistence = (
+  message: string,
+  payload?: Record<string, unknown>,
+) => {
+  if (!RECURRING_RECEITAS_DEBUG) return
+  console.info('[receitas-recorrentes][persistence]', message, payload ?? {})
+}
+
 const normalizeTimestamp = (value: unknown) => {
   if (!value) return null
   if (value instanceof Date) return value.toISOString()
@@ -194,6 +237,9 @@ const mapReceitaRow = (row: Row | null): Receita => ({
   tipo: row?.tipo === 'Fixa' ? 'Fixa' : 'Variável',
   valor: parseNumber(row?.valor),
   recorrente: Boolean(row?.recorrente),
+  recurringGroupId: normalizeOptionalString(row?.recurring_group_id),
+  recurrenceEndsAt: normalizeOptionalDateString(row?.recurrence_ends_at),
+  skipMonths: normalizeStringArray(row?.skip_months),
   perfil: asPerfil(row?.perfil),
 })
 
@@ -491,12 +537,28 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
       }
     }
 
-    const addReceita = async (input: ReceitaInput) => {
-      if (!userId) return
-      if (!ensureCreationAllowed()) {
-        return
+    const insertReceita = async (
+      input: ReceitaInput,
+      options?: {
+        enforceQuota?: boolean
+        consumeQuota?: boolean
+      },
+    ) => {
+      if (!userId) return null
+      const enforceQuota = options?.enforceQuota ?? true
+      const shouldConsumeQuota = options?.consumeQuota ?? enforceQuota
+
+      if (enforceQuota && !ensureCreationAllowed()) {
+        return null
       }
+
       const perfil = ensurePerfil(input.perfil)
+      const recurringGroupId = normalizeOptionalString(input.recurringGroupId)
+      const recurrenceEndsAt = normalizeOptionalDateString(
+        input.recurrenceEndsAt,
+      )
+      const skipMonths = normalizeStringArray(input.skipMonths)
+
       const { data, error: insertError } = await supabase
         .from('receitas')
         .insert([
@@ -507,6 +569,9 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
             tipo: input.tipo,
             valor: input.valor,
             recorrente: Boolean(input.recorrente),
+            recurring_group_id: recurringGroupId ?? null,
+            recurrence_ends_at: recurrenceEndsAt ?? null,
+            skip_months: skipMonths,
             perfil,
           },
         ])
@@ -515,32 +580,102 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
 
       if (insertError) {
         console.error('Erro ao adicionar receita', insertError)
-        return
+        return null
       }
 
       if (data) {
-        const newItem = mapReceitaRow(data)
+        let savedRow = data
+        const shouldBackfillRecurringGroupId =
+          Boolean(input.recorrente) &&
+          !recurringGroupId &&
+          typeof data.id === 'string' &&
+          data.id.trim() !== ''
+
+        if (shouldBackfillRecurringGroupId) {
+          const generatedRecurringGroupId = String(data.id)
+          logRecurringReceitaPersistence('backfill recurring_group_id iniciado', {
+            receitaId: generatedRecurringGroupId,
+          })
+          const { data: updatedRow, error: recurringGroupError } = await supabase
+            .from('receitas')
+            .update({
+              recurring_group_id: generatedRecurringGroupId,
+            })
+            .eq('id', generatedRecurringGroupId)
+            .eq('user_id', userId)
+            .select('*')
+            .single()
+
+          if (recurringGroupError) {
+            console.error(
+              'Erro ao atualizar recurring_group_id da receita',
+              recurringGroupError,
+            )
+          } else if (updatedRow) {
+            savedRow = updatedRow
+            logRecurringReceitaPersistence(
+              'backfill recurring_group_id concluido',
+              {
+                receitaId: generatedRecurringGroupId,
+                recurringGroupId:
+                  typeof updatedRow.recurring_group_id === 'string'
+                    ? updatedRow.recurring_group_id
+                    : generatedRecurringGroupId,
+              },
+            )
+          }
+        }
+
+        const newItem = mapReceitaRow(savedRow)
         setState(prev => ({
           ...prev,
           receitas: [...prev.receitas, newItem],
         }))
-        consumeCreationQuota()
+        if (shouldConsumeQuota) {
+          consumeCreationQuota()
+        }
+        return newItem
       }
+
+      return null
     }
 
+    const addReceita = async (input: ReceitaInput) => {
+      await insertReceita(input)
+    }
+
+    const replicateReceita = async (input: ReceitaInput) =>
+      insertReceita(input, {
+        enforceQuota: false,
+        consumeQuota: false,
+      })
+
     const updateReceita = async (id: string, input: ReceitaInput) => {
-      if (!userId) return
+      if (!userId) return false
       const perfil = ensurePerfil(input.perfil)
+      const payload: Record<string, unknown> = {
+        data: input.data,
+        fonte: input.fonte,
+        tipo: input.tipo,
+        valor: input.valor,
+        recorrente: Boolean(input.recorrente),
+        perfil,
+      }
+
+      if (input.recurringGroupId !== undefined) {
+        payload.recurring_group_id = normalizeOptionalString(input.recurringGroupId) ?? null
+      }
+      if (input.recurrenceEndsAt !== undefined) {
+        payload.recurrence_ends_at =
+          normalizeOptionalDateString(input.recurrenceEndsAt) ?? null
+      }
+      if (input.skipMonths !== undefined) {
+        payload.skip_months = normalizeStringArray(input.skipMonths)
+      }
+
       const { data, error: updateError } = await supabase
         .from('receitas')
-        .update({
-          data: input.data,
-          fonte: input.fonte,
-          tipo: input.tipo,
-          valor: input.valor,
-          recorrente: Boolean(input.recorrente),
-          perfil,
-        })
+        .update(payload)
         .eq('id', id)
         .eq('user_id', userId)
         .select('*')
@@ -548,7 +683,7 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
 
       if (updateError) {
         console.error('Erro ao atualizar receita', updateError)
-        return
+        return false
       }
 
       if (data) {
@@ -560,10 +695,12 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
           ),
         }))
       }
+
+      return true
     }
 
     const deleteReceita = async (id: string) => {
-      if (!userId) return
+      if (!userId) return false
       const { error: deleteError } = await supabase
         .from('receitas')
         .delete()
@@ -572,13 +709,15 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
 
       if (deleteError) {
         console.error('Erro ao remover receita', deleteError)
-        return
+        return false
       }
 
       setState(prev => ({
         ...prev,
         receitas: prev.receitas.filter(item => item.id !== id),
       }))
+
+      return true
     }
 
     const addDespesaFixa = async (input: DespesaFixaInput) => {
@@ -801,6 +940,7 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
     return {
       ...state,
       addReceita,
+      replicateReceita,
       updateReceita,
       deleteReceita,
       addDespesaFixa,

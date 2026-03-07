@@ -5,7 +5,7 @@ import { formatCurrency, formatDate } from '../utils/format'
 type Props = {
   data: Receita[]
   onEdit: (item: Receita) => void
-  onDelete: (id: string) => void
+  onDelete: (item: Receita) => void
   disabled?: boolean
 }
 
@@ -74,7 +74,7 @@ export function ReceitasTable({ data, onEdit, onDelete, disabled }: Props) {
                   Editar
                 </button>
                 <button
-                  onClick={() => onDelete(item.id)}
+                  onClick={() => onDelete(item)}
                   disabled={isDisabled}
                   title={actionTitle}
                   className="rounded-md bg-slate-800 px-3 py-1 text-xs font-semibold text-rose-400 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
@@ -130,7 +130,7 @@ export function ReceitasTable({ data, onEdit, onDelete, disabled }: Props) {
                       Editar
                     </button>
                     <button
-                      onClick={() => onDelete(item.id)}
+                      onClick={() => onDelete(item)}
                       disabled={isDisabled}
                       title={actionTitle}
                       className="rounded-md px-3 py-1 text-xs font-semibold text-rose-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"

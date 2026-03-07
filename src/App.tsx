@@ -36,6 +36,7 @@ import { AuthWrapper } from './components/AuthWrapper'
 import { AdminOnly } from './components/AdminOnly'
 import { ReceitasForm } from './components/ReceitasForm'
 import { ReceitasTable } from './components/ReceitasTable'
+import { RecurringReceitaDeleteModal } from './components/RecurringReceitaDeleteModal'
 import { DespesasFixasForm } from './components/DespesasFixasForm'
 import { DespesasFixasTable } from './components/DespesasFixasTable'
 import { DespesasVariaveisForm } from './components/DespesasVariaveisForm'
@@ -88,6 +89,138 @@ const moveDateToMonthYear = (
   const mm = String(result.getMonth() + 1).padStart(2, '0')
   const dd = String(result.getDate()).padStart(2, '0')
   return `${yyyy}-${mm}-${dd}`
+}
+
+const RECURRING_RECEITAS_DEBUG =
+  import.meta.env.DEV || import.meta.env.VITE_DEBUG_RECURRING_RECEITAS === '1'
+
+const logRecurringReceitas = (
+  message: string,
+  payload?: Record<string, unknown>,
+) => {
+  if (!RECURRING_RECEITAS_DEBUG) return
+  console.info('[receitas-recorrentes]', message, payload ?? {})
+}
+
+const getMonthYearFromDate = (dateString: string) => {
+  const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) {
+    const fallback = new Date()
+    return {
+      month: fallback.getMonth(),
+      year: fallback.getFullYear(),
+    }
+  }
+
+  return {
+    month: date.getMonth(),
+    year: date.getFullYear(),
+  }
+}
+
+const formatMonthKey = (monthOrDate: number | string, year?: number) => {
+  if (typeof monthOrDate === 'string') {
+    const parsed = getMonthYearFromDate(monthOrDate)
+    return `${parsed.year}-${String(parsed.month + 1).padStart(2, '0')}`
+  }
+
+  return `${year}-${String(monthOrDate + 1).padStart(2, '0')}`
+}
+
+const isSameReceitaSignature = (left: Receita, right: Receita) =>
+  left.perfil === right.perfil &&
+  left.fonte === right.fonte &&
+  left.tipo === right.tipo &&
+  left.valor === right.valor
+
+const sameRecurringSeries = (left: Receita, right: Receita) => {
+  if (left.recurringGroupId && right.recurringGroupId) {
+    return left.recurringGroupId === right.recurringGroupId
+  }
+  if (left.recurringGroupId && right.id === left.recurringGroupId) {
+    return true
+  }
+  if (right.recurringGroupId && left.id === right.recurringGroupId) {
+    return true
+  }
+
+  return isSameReceitaSignature(left, right)
+}
+
+const getSeriesOrigin = (source: Receita, items: Receita[]) => {
+  const candidates = source.recurringGroupId
+    ? items.filter(
+        item =>
+          item.id === source.recurringGroupId ||
+          item.recurringGroupId === source.recurringGroupId,
+      )
+    : items.filter(item => sameRecurringSeries(item, source))
+
+  if (candidates.length === 0) {
+    return source
+  }
+
+  return candidates.reduce((earliest, current) =>
+    current.data < earliest.data ? current : earliest,
+  )
+}
+
+const getRecurringSeriesKey = (source: Receita, items: Receita[]) => {
+  const origin = getSeriesOrigin(source, items)
+  if (origin.recurringGroupId) {
+    return `group:${origin.recurringGroupId}`
+  }
+  return `legacy:${origin.perfil}|${origin.fonte}|${origin.tipo}|${origin.valor}|${origin.data}`
+}
+
+const findReceitaInMonthBySeries = (
+  source: Receita,
+  items: Receita[],
+  targetMonth: number,
+  targetYear: number,
+  options?: {
+    requireRecurring?: boolean
+  },
+) => {
+  return (
+    items.find(
+      item =>
+        item.id !== source.id &&
+        (!options?.requireRecurring || item.recorrente) &&
+        sameRecurringSeries(item, source) &&
+        isSameMonthYear(item.data, targetMonth, targetYear),
+    ) ?? null
+  )
+}
+
+const getLatestReceitaBeforeMonthInSeries = (
+  source: Receita,
+  items: Receita[],
+  targetMonth: number,
+  targetYear: number,
+) => {
+  const targetMonthKey = formatMonthKey(targetMonth, targetYear)
+  const seriesItems = items
+    .filter(
+      item =>
+        sameRecurringSeries(item, source) &&
+        formatMonthKey(item.data) < targetMonthKey,
+    )
+    .sort((left, right) => left.data.localeCompare(right.data))
+
+  return seriesItems.length > 0 ? seriesItems[seriesItems.length - 1] : null
+}
+
+const mergeSkipMonths = (...values: Array<string[] | undefined>) =>
+  Array.from(new Set(values.flatMap(value => value ?? []).filter(Boolean))).sort()
+
+const isSeriesEndedForMonth = (
+  origin: Receita,
+  targetMonth: number,
+  targetYear: number,
+) => {
+  if (!origin.recurrenceEndsAt) return false
+  return formatMonthKey(targetMonth, targetYear) >= formatMonthKey(origin.recurrenceEndsAt)
 }
 
 /**
@@ -147,6 +280,7 @@ function Dashboard() {
     null,
   )
   const [pendingVoiceFromFab, setPendingVoiceFromFab] = useState(false)
+  const pendingReceitaReplicationsRef = useRef<Set<string>>(new Set())
 
   // ✅ trava para garantir que voz só dispare por LONG PRESS no FAB
   const voiceTriggerArmedRef = useRef(false)
@@ -167,6 +301,7 @@ function Dashboard() {
     despesasFixas,
     despesasVariaveis,
     addReceita,
+    replicateReceita,
     updateReceita,
     deleteReceita,
     addDespesaFixa,
@@ -216,6 +351,10 @@ function Dashboard() {
 
   // Edit states
   const [editingReceita, setEditingReceita] = useState<Receita | null>(null)
+  const [receitaDeleteTarget, setReceitaDeleteTarget] = useState<Receita | null>(
+    null,
+  )
+  const [receitaDeleteProcessing, setReceitaDeleteProcessing] = useState(false)
   const [editingDespesaFixa, setEditingDespesaFixa] = useState<DespesaFixa | null>(
     null,
   )
@@ -249,6 +388,20 @@ function Dashboard() {
   const handleEditReceita = (item: Receita) => {
     setEditingReceita(item)
     openSectionAndFocus('receitas')
+  }
+
+  const closeRecurringReceitaDeleteModal = () => {
+    if (receitaDeleteProcessing) return
+    setReceitaDeleteTarget(null)
+  }
+
+  const handleDeleteReceita = (item: Receita) => {
+    if (!item.recorrente) {
+      void deleteReceita(item.id)
+      return
+    }
+
+    setReceitaDeleteTarget(item)
   }
 
   const handleEditDespesaFixa = (item: DespesaFixa) => {
@@ -504,40 +657,268 @@ function Dashboard() {
     addDespesaFixa,
   ])
 
-  // replica receitas recorrentes se mês vazio
+  // replica receitas recorrentes item a item
   useEffect(() => {
-    if (receitasFiltradas.length > 0) return
+    const currentMonthKey = formatMonthKey(selectedMonth, selectedYear)
 
-    const prevMonth = selectedMonth === 0 ? 11 : selectedMonth - 1
-    const prevYear = selectedMonth === 0 ? selectedYear - 1 : selectedYear
+    const seriesOrigins = receitas
+      .filter(item => item.perfil === perfil && item.recorrente)
+      .map(item => getSeriesOrigin(item, receitas))
+      .filter(
+        (origin, index, items) =>
+          items.findIndex(
+            item => getRecurringSeriesKey(item, receitas) === getRecurringSeriesKey(origin, receitas),
+          ) === index,
+      )
 
-    const recorrentesDoMesAnterior = receitas.filter(
-      r =>
-        r.perfil === perfil &&
-        r.recorrente &&
-        isSameMonthYear(r.data, prevMonth, prevYear),
-    )
+    logRecurringReceitas('avaliando replicacao do mes', {
+      perfil,
+      selectedMonth,
+      selectedYear,
+      currentMonthKey,
+      activeSeries: seriesOrigins.length,
+    })
 
-    if (recorrentesDoMesAnterior.length === 0) return
+    seriesOrigins.forEach(origin => {
+      const seriesKey = getRecurringSeriesKey(origin, receitas)
+      const originMonthKey = formatMonthKey(origin.data)
+      const skipMonths = origin.skipMonths ?? []
+      const ended = isSeriesEndedForMonth(origin, selectedMonth, selectedYear)
+      const latestOccurrence = getLatestReceitaBeforeMonthInSeries(
+        origin,
+        receitas,
+        selectedMonth,
+        selectedYear,
+      )
 
-    recorrentesDoMesAnterior.forEach(r => {
-      void addReceita({
-        data: moveDateToMonthYear(r.data, selectedMonth, selectedYear),
-        fonte: r.fonte,
-        tipo: r.tipo,
-        valor: r.valor,
-        recorrente: true,
-        perfil: r.perfil,
+      if (!origin.recorrente) {
+        logRecurringReceitas('serie ignorada: origem nao recorrente', {
+          seriesKey,
+          originId: origin.id,
+        })
+        return
+      }
+      if (currentMonthKey <= originMonthKey) {
+        logRecurringReceitas('serie ignorada: mes selecionado nao e posterior a origem', {
+          seriesKey,
+          originId: origin.id,
+          originMonthKey,
+          currentMonthKey,
+        })
+        return
+      }
+      if (!latestOccurrence) {
+        logRecurringReceitas('serie ignorada: nenhuma ocorrencia anterior encontrada', {
+          seriesKey,
+          originId: origin.id,
+          originMonthKey,
+          currentMonthKey,
+        })
+        return
+      }
+      if (ended) {
+        logRecurringReceitas('serie ignorada: recorrencia encerrada', {
+          seriesKey,
+          originId: origin.id,
+          recurrenceEndsAt: origin.recurrenceEndsAt,
+          currentMonthKey,
+        })
+        return
+      }
+      if (skipMonths.includes(currentMonthKey)) {
+        logRecurringReceitas('serie ignorada: mes atual esta em skipMonths', {
+          seriesKey,
+          originId: origin.id,
+          currentMonthKey,
+          skipMonths,
+        })
+        return
+      }
+
+      const currentOccurrence = findReceitaInMonthBySeries(
+        origin,
+        receitas,
+        selectedMonth,
+        selectedYear,
+      )
+      if (currentOccurrence) {
+        logRecurringReceitas('serie ignorada: ocorrencia ja existe no mes atual', {
+          seriesKey,
+          originId: origin.id,
+          currentMonthKey,
+          currentOccurrenceId: currentOccurrence.id,
+        })
+        return
+      }
+
+      const replicationKey = `${seriesKey}|${currentMonthKey}`
+
+      if (pendingReceitaReplicationsRef.current.has(replicationKey)) {
+        logRecurringReceitas('serie ignorada: replicacao em voo', {
+          seriesKey,
+          replicationKey,
+        })
+        return
+      }
+
+      pendingReceitaReplicationsRef.current.add(replicationKey)
+      const replicationDate = moveDateToMonthYear(
+        latestOccurrence.data,
+        selectedMonth,
+        selectedYear,
+      )
+
+      logRecurringReceitas('replicando serie', {
+        seriesKey,
+        originId: origin.id,
+        latestOccurrenceId: latestOccurrence.id,
+        latestOccurrenceDate: latestOccurrence.data,
+        replicationDate,
+        skipMonths,
+        recurrenceEndsAt: origin.recurrenceEndsAt,
       })
+
+      void replicateReceita({
+        data: replicationDate,
+        fonte: latestOccurrence.fonte,
+        tipo: latestOccurrence.tipo,
+        valor: latestOccurrence.valor,
+        recorrente: true,
+        recurringGroupId: origin.recurringGroupId ?? origin.id,
+        recurrenceEndsAt: origin.recurrenceEndsAt,
+        skipMonths,
+        perfil: latestOccurrence.perfil,
+      })
+        .then(created => {
+          logRecurringReceitas('resultado da replicacao', {
+            seriesKey,
+            replicationKey,
+            createdId: created?.id ?? null,
+          })
+        })
+        .catch(error => {
+          console.error('[receitas-recorrentes] falha ao replicar serie', {
+            seriesKey,
+            replicationKey,
+            error,
+          })
+        })
+        .finally(() => {
+          pendingReceitaReplicationsRef.current.delete(replicationKey)
+        })
     })
   }, [
     receitas,
-    receitasFiltradas.length,
     selectedMonth,
     selectedYear,
     perfil,
-    addReceita,
+    replicateReceita,
   ])
+
+  const handleDeleteOnlyCurrentReceita = async () => {
+    if (!receitaDeleteTarget || receitaDeleteProcessing) return
+
+    setReceitaDeleteProcessing(true)
+    const currentMonthKey = formatMonthKey(receitaDeleteTarget.data)
+    const seriesOrigin = getSeriesOrigin(receitaDeleteTarget, receitas)
+    const carrier =
+      seriesOrigin.id === receitaDeleteTarget.id
+        ? receitas
+            .filter(
+              item =>
+                item.id !== receitaDeleteTarget.id &&
+                sameRecurringSeries(item, receitaDeleteTarget),
+            )
+            .sort((left, right) => left.data.localeCompare(right.data))[0] ?? null
+        : seriesOrigin
+
+    if (carrier) {
+      const updated = await updateReceita(carrier.id, {
+        data: carrier.data,
+        fonte: carrier.fonte,
+        tipo: carrier.tipo,
+        valor: carrier.valor,
+        recorrente: true,
+        recurringGroupId:
+          carrier.recurringGroupId ??
+          seriesOrigin.recurringGroupId ??
+          seriesOrigin.id,
+        recurrenceEndsAt: carrier.recurrenceEndsAt ?? seriesOrigin.recurrenceEndsAt,
+        skipMonths: mergeSkipMonths(
+          seriesOrigin.skipMonths,
+          carrier.skipMonths,
+          [currentMonthKey],
+        ),
+        perfil: carrier.perfil,
+      })
+
+      if (!updated) {
+        setReceitaDeleteProcessing(false)
+        toast.error('Não foi possível registrar o mês pulado da recorrência.')
+        return
+      }
+    }
+
+    const deleted = await deleteReceita(receitaDeleteTarget.id)
+
+    if (!deleted) {
+      setReceitaDeleteProcessing(false)
+      toast.error('Não foi possível excluir a receita.')
+      return
+    }
+
+    setReceitaDeleteProcessing(false)
+    setReceitaDeleteTarget(null)
+  }
+
+  const handleStopRecurringReceita = async () => {
+    if (!receitaDeleteTarget || receitaDeleteProcessing) return
+
+    setReceitaDeleteProcessing(true)
+
+    const seriesOrigin = getSeriesOrigin(receitaDeleteTarget, receitas)
+    const currentMonthKey = formatMonthKey(receitaDeleteTarget.data)
+    const itemsToDelete = receitas.filter(
+      item =>
+        sameRecurringSeries(item, receitaDeleteTarget) &&
+        formatMonthKey(item.data) >= currentMonthKey,
+    )
+    let failed = false
+
+    if (seriesOrigin.id !== receitaDeleteTarget.id) {
+      const updated = await updateReceita(seriesOrigin.id, {
+        data: seriesOrigin.data,
+        fonte: seriesOrigin.fonte,
+        tipo: seriesOrigin.tipo,
+        valor: seriesOrigin.valor,
+        recorrente: false,
+        recurringGroupId: seriesOrigin.recurringGroupId ?? seriesOrigin.id,
+        recurrenceEndsAt: receitaDeleteTarget.data,
+        skipMonths: seriesOrigin.skipMonths ?? [],
+        perfil: seriesOrigin.perfil,
+      })
+
+      if (!updated) {
+        setReceitaDeleteProcessing(false)
+        toast.error('Não foi possível encerrar a série recorrente.')
+        return
+      }
+    }
+
+    for (const item of itemsToDelete) {
+      const deleted = await deleteReceita(item.id)
+      if (!deleted) {
+        failed = true
+      }
+    }
+
+    setReceitaDeleteProcessing(false)
+    setReceitaDeleteTarget(null)
+
+    if (failed) {
+      toast.error('Não foi possível parar a recorrência por completo.')
+    }
+  }
 
   const annualAccordionSections = useMemo<SectionAccordionItem[]>(
     () => [
@@ -583,7 +964,7 @@ function Dashboard() {
             <ReceitasTable
               data={receitasFiltradas}
               onEdit={handleEditReceita}
-              onDelete={id => void deleteReceita(id)}
+              onDelete={handleDeleteReceita}
             />
           </div>
         ),
@@ -874,6 +1255,14 @@ function Dashboard() {
           </button>
         </div>
       )}
+
+      <RecurringReceitaDeleteModal
+        open={Boolean(receitaDeleteTarget)}
+        processing={receitaDeleteProcessing}
+        onClose={closeRecurringReceitaDeleteModal}
+        onDeleteOnlyCurrent={() => void handleDeleteOnlyCurrentReceita()}
+        onStopRecurring={() => void handleStopRecurringReceita()}
+      />
     </div>
   )
 }
