@@ -8,7 +8,7 @@ import {
 import { useEntitlements } from '../hooks/useEntitlements'
 
 type Props = {
-  onSave: (data: ReceitaInput) => void
+  onSave: (data: ReceitaInput) => Promise<boolean>
   editing?: Receita | null
   onCancel?: () => void
   disabled?: boolean
@@ -75,17 +75,20 @@ export function ReceitasForm({ onSave, editing, onCancel, disabled }: Props) {
     }
   }, [editing])
 
-  const handleSubmit = (event: FormEvent) => {
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
     if (isDisabled) {
       return
     }
-    onSave({ ...form, valor: Number(form.valor) || 0 })
+    const saved = await onSave({ ...form, valor: Number(form.valor) || 0 })
+    if (!saved) return
+
     if (editing) {
       onCancel?.()
-    } else {
-      setForm(defaultForm)
+      return
     }
+
+    setForm(defaultForm)
   }
 
   return (

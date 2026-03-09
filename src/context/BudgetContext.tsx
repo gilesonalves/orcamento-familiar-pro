@@ -86,7 +86,7 @@ type BudgetState = {
 }
 
 type BudgetContextValue = BudgetState & {
-  addReceita: (input: ReceitaInput) => Promise<void>
+  addReceita: (input: ReceitaInput) => Promise<boolean>
   replicateReceita: (input: ReceitaInput) => Promise<Receita | null>
   updateReceita: (id: string, input: ReceitaInput) => Promise<boolean>
   deleteReceita: (id: string) => Promise<boolean>
@@ -95,7 +95,7 @@ type BudgetContextValue = BudgetState & {
   updateDespesaFixa: (id: string, input: DespesaFixaInput) => Promise<void>
   deleteDespesaFixa: (id: string) => Promise<void>
 
-  addDespesaVariavel: (input: DespesaVariavelInput) => Promise<void>
+  addDespesaVariavel: (input: DespesaVariavelInput) => Promise<boolean>
   updateDespesaVariavel: (
     id: string,
     input: DespesaVariavelInput,
@@ -640,9 +640,8 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
       return null
     }
 
-    const addReceita = async (input: ReceitaInput) => {
-      await insertReceita(input)
-    }
+    const addReceita = async (input: ReceitaInput) =>
+      (await insertReceita(input)) !== null
 
     const replicateReceita = async (input: ReceitaInput) =>
       insertReceita(input, {
@@ -813,9 +812,9 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
     }
 
     const addDespesaVariavel = async (input: DespesaVariavelInput) => {
-      if (!userId) return
+      if (!userId) return false
       if (!ensureCreationAllowed()) {
-        return
+        return false
       }
       const perfil = ensurePerfil(input.perfil)
       const payload: Record<string, unknown> = {
@@ -850,7 +849,7 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
 
       if (insertError) {
         console.error('Erro ao adicionar despesa variavel', insertError)
-        return
+        return false
       }
 
       if (data) {
@@ -860,7 +859,10 @@ export const BudgetProvider = ({ children }: BudgetProviderProps) => {
           despesasVariaveis: [...prev.despesasVariaveis, newItem],
         }))
         consumeCreationQuota()
+        return true
       }
+
+      return false
     }
 
     const updateDespesaVariavel = async (
