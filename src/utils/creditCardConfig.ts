@@ -23,6 +23,9 @@ const parseCycleDay = (value: string | null, fallback: number) => {
   return Math.min(28, Math.max(1, Math.floor(parsed)))
 }
 
+const hasStoredValue = (value: string | null) =>
+  typeof value === 'string' && value.trim().length > 0
+
 const getStorageFallback = () => {
   if (typeof window === 'undefined') {
     return {
@@ -41,6 +44,17 @@ const getStorageFallback = () => {
       DEFAULT_CREDIT_CARD_DUE_DAY,
     ),
   }
+}
+
+const getHasStoredConfigFallback = () => {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  return (
+    hasStoredValue(window.localStorage.getItem(CREDIT_CARD_CLOSING_DAY_KEY)) &&
+    hasStoredValue(window.localStorage.getItem(CREDIT_CARD_DUE_DAY_KEY))
+  )
 }
 
 export const loadCreditCardConfig = async (): Promise<CreditCardConfig> => {
@@ -113,4 +127,23 @@ export const saveCreditCardConfig = async (
   }
 
   return normalized
+}
+
+export const hasStoredCreditCardConfig = async (): Promise<boolean> => {
+  try {
+    if (isNativeApp()) {
+      const [closingResult, dueResult] = await Promise.all([
+        Preferences.get({ key: CREDIT_CARD_CLOSING_DAY_KEY }),
+        Preferences.get({ key: CREDIT_CARD_DUE_DAY_KEY }),
+      ])
+
+      return (
+        hasStoredValue(closingResult.value) && hasStoredValue(dueResult.value)
+      )
+    }
+
+    return getHasStoredConfigFallback()
+  } catch {
+    return getHasStoredConfigFallback()
+  }
 }

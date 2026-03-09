@@ -20,6 +20,10 @@ import {
   type PerfilOrcamento,
 } from './context/BudgetContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
+import {
+  OnboardingProvider,
+  useOnboarding,
+} from './context/OnboardingContext'
 import { EntitlementsProvider } from './contexts/EntitlementsContext'
 import { useEntitlements } from './hooks/useEntitlements'
 
@@ -44,6 +48,9 @@ import { DespesasVariaveisTable } from './components/DespesasVariaveisTable'
 import { TrialExpiredBanner } from './components/TrialExpiredBanner'
 import { PaywallModal } from './components/PaywallModal'
 import { PlanBadge } from './components/PlanBadge'
+import { ContextTip } from './components/onboarding/ContextTip'
+import { OnboardingChecklist } from './components/onboarding/OnboardingChecklist'
+import { OnboardingIntro } from './components/onboarding/OnboardingIntro'
 
 import { InvitesAdminPage } from './pages/admin/InvitesAdminPage'
 import { Settings } from './pages/Settings'
@@ -262,6 +269,11 @@ function EntryRoute() {
 
 function Dashboard() {
   const VOICE_HINT_KEY = 'voice_fab_hint_seen'
+  type DashboardRouteState = {
+    accessRestricted?: boolean
+    onboardingSection?: 'receitas' | 'despesas-variaveis'
+    onboardingView?: 'monthly-summary' | 'annual-summary' | 'overview'
+  }
 
   const today = new Date()
   const [selectedMonth, setSelectedMonth] = useState(today.getMonth())
@@ -270,10 +282,16 @@ function Dashboard() {
 
   // Accordion + foco
   const [openSectionId, setOpenSectionId] = useState<string | null>(null)
+  const [openAnnualSectionId, setOpenAnnualSectionId] = useState<string | null>(
+    null,
+  )
   const [lastSectionUsed, setLastSectionUsed] = useState<string>(
     'despesas-variaveis',
   )
   const sectionContentRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const dashboardOverviewRef = useRef<HTMLElement | null>(null)
+  const monthlySummaryRef = useRef<HTMLElement | null>(null)
+  const annualSummaryRef = useRef<HTMLElement | null>(null)
 
   // Voz via FAB
   const [voiceLauncher, setVoiceLauncher] = useState<(() => Promise<void>) | null>(
@@ -295,6 +313,9 @@ function Dashboard() {
 
   const location = useLocation()
   const navigate = useNavigate()
+  const routeState = (location.state as DashboardRouteState | null) ?? null
+  const onboardingSection = routeState?.onboardingSection
+  const onboardingView = routeState?.onboardingView
 
   const {
     receitas,
@@ -314,6 +335,12 @@ function Dashboard() {
   } = useBudget()
 
   const { userRole, roleLoading } = useAuth()
+  const {
+    completePendingAction,
+    dismissTip,
+    markViewStepSeen,
+    progress: onboardingProgress,
+  } = useOnboarding()
   const { isPro, openPaywall } = useEntitlements()
 
   const access = useMemo(
@@ -382,7 +409,36 @@ function Dashboard() {
 
     setOpenSectionId(sectionId)
     setLastSectionUsed(sectionId)
-    requestAnimationFrame(() => focusFirstInputInSection(sectionId))
+    requestAnimationFrame(() => {
+      sectionContentRefs.current[sectionId]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+      focusFirstInputInSection(sectionId)
+    })
+  }
+
+  const openMonthlySummaryView = () => {
+    clearVoicePending()
+    void markViewStepSeen('monthly-summary')
+    requestAnimationFrame(() => {
+      monthlySummaryRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+  }
+
+  const openAnnualSummaryView = () => {
+    clearVoicePending()
+    setOpenAnnualSectionId('resumo-anual')
+    void markViewStepSeen('annual-summary')
+    requestAnimationFrame(() => {
+      annualSummaryRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
   }
 
   const handleEditReceita = (item: Receita) => {
@@ -481,7 +537,64 @@ function Dashboard() {
     navigate(location.pathname, { replace: true, state: null })
   }, [location.pathname, location.state, navigate])
 
+  useEffect(() => {
+    if (!onboardingSection && !onboardingView) return
+
+    setEditingReceita(null)
+    setEditingDespesaFixa(null)
+    setEditingDespesaVariavel(null)
+
+    if (onboardingSection) {
+      openSectionAndFocus(onboardingSection)
+    }
+
+    if (onboardingView === 'overview') {
+      requestAnimationFrame(() => {
+        dashboardOverviewRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        })
+      })
+    }
+
+    if (onboardingView === 'monthly-summary') {
+      openMonthlySummaryView()
+    }
+
+    if (onboardingView === 'annual-summary') {
+      openAnnualSummaryView()
+    }
+
+    navigate(location.pathname, {
+      replace: true,
+      state: routeState?.accessRestricted ? { accessRestricted: true } : null,
+    })
+  }, [
+    location.pathname,
+    navigate,
+    onboardingSection,
+    onboardingView,
+    openAnnualSummaryView,
+    openMonthlySummaryView,
+    routeState?.accessRestricted,
+  ])
+
   // ✅ FAB short
+  useEffect(() => {
+    if (
+      openAnnualSectionId !== 'resumo-anual' ||
+      onboardingProgress.annual_summary_seen
+    ) {
+      return
+    }
+
+    void markViewStepSeen('annual-summary')
+  }, [
+    markViewStepSeen,
+    onboardingProgress.annual_summary_seen,
+    openAnnualSectionId,
+  ])
+
   const handleFabShortPress = () => {
     if (!canCreateEntry) return
     // ✅ short press não arma voz
@@ -932,6 +1045,72 @@ function Dashboard() {
     [selectedYear, saldoAno, perfil],
   )
 
+  const checklistItems = useMemo(
+    () => [
+      {
+        title: 'Configurar cartao',
+        description: 'Defina fechamento e vencimento para organizar compras no credito.',
+        done: onboardingProgress.card_setup_done,
+        actionLabel: onboardingProgress.card_setup_done ? 'Rever' : 'Configurar',
+        onClick: () => {
+          navigate({
+            pathname: '/settings',
+            hash: '#credit-card-settings',
+          })
+        },
+      },
+      {
+        title: 'Adicionar receita',
+        description: 'Cadastre salario, renda extra ou outras entradas do mes.',
+        done: onboardingProgress.first_income_done,
+        actionLabel: onboardingProgress.first_income_done ? 'Rever' : 'Abrir',
+        onClick: () => {
+          openSectionAndFocus('receitas')
+        },
+      },
+      {
+        title: 'Adicionar despesa',
+        description: 'Lance gastos manuais ou por voz para iniciar seu controle.',
+        done: onboardingProgress.first_expense_done,
+        actionLabel: onboardingProgress.first_expense_done ? 'Rever' : 'Abrir',
+        onClick: () => {
+          openSectionAndFocus('despesas-variaveis')
+        },
+      },
+      {
+        title: 'Ver resumo mensal',
+        description: 'Confira entradas, saidas e saldo do periodo atual.',
+        done: onboardingProgress.monthly_summary_seen,
+        actionLabel: onboardingProgress.monthly_summary_seen ? 'Ver' : 'Explorar',
+        onClick: () => {
+          openMonthlySummaryView()
+        },
+      },
+      {
+        title: 'Ver visao anual',
+        description: 'Compare meses e acompanhe sua evolucao financeira.',
+        done: onboardingProgress.annual_summary_seen,
+        actionLabel: onboardingProgress.annual_summary_seen ? 'Ver' : 'Explorar',
+        onClick: () => {
+          openAnnualSummaryView()
+        },
+      },
+    ],
+    [
+      navigate,
+      onboardingProgress.annual_summary_seen,
+      onboardingProgress.card_setup_done,
+      onboardingProgress.first_expense_done,
+      onboardingProgress.first_income_done,
+      onboardingProgress.monthly_summary_seen,
+      openAnnualSummaryView,
+      openMonthlySummaryView,
+      openSectionAndFocus,
+    ],
+  )
+
+  const showOnboardingChecklist = checklistItems.some(item => !item.done)
+
   const accordionSections = useMemo<SectionAccordionItem[]>(
     () => [
       {
@@ -949,16 +1128,23 @@ function Dashboard() {
               editing={editingReceita}
               onCancel={() => setEditingReceita(null)}
               disabled={!canCreateEntry && !editingReceita}
-              onSave={data => {
+              onSave={async data => {
                 if (editingReceita) {
-                  void updateReceita(editingReceita.id, {
+                  const updated = await updateReceita(editingReceita.id, {
                     ...data,
                     perfil: editingReceita.perfil,
                   })
-                  setEditingReceita(null)
-                } else {
-                  void addReceita({ ...data, perfil })
+                  if (updated) {
+                    setEditingReceita(null)
+                  }
+                  return updated
                 }
+
+                const created = await addReceita({ ...data, perfil })
+                if (created) {
+                  await completePendingAction('add-income')
+                }
+                return created
               }}
             />
             <ReceitasTable
@@ -1040,7 +1226,14 @@ function Dashboard() {
                     return true
                   }
 
-                  await addDespesaVariavel({ ...data, perfil })
+                  const created = await addDespesaVariavel({ ...data, perfil })
+                  if (!created) {
+                    clearVoicePending()
+                    toast.error('NÃ£o foi possÃ­vel salvar a despesa.')
+                    return false
+                  }
+
+                  await completePendingAction('add-expense')
                   clearVoicePending()
                   toast.success('Despesa adicionada ✅')
                   return true
@@ -1053,8 +1246,12 @@ function Dashboard() {
               onSaveMany={async items => {
                 try {
                   for (const item of items) {
-                    await addDespesaVariavel({ ...item, perfil })
+                    const created = await addDespesaVariavel({ ...item, perfil })
+                    if (!created) {
+                      throw new Error('saveMany failed')
+                    }
                   }
+                  await completePendingAction('add-expense')
                   clearVoicePending()
                   toast.success('Despesas adicionadas ✅')
                 } catch {
@@ -1093,6 +1290,7 @@ function Dashboard() {
       updateDespesaFixa,
       deleteDespesaFixa,
       addDespesaVariavel,
+      completePendingAction,
       updateDespesaVariavel,
       deleteDespesaVariavel,
     ],
@@ -1140,7 +1338,10 @@ function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 py-6 space-y-8 sm:px-6">
+      <main
+        ref={dashboardOverviewRef}
+        className="mx-auto max-w-5xl px-4 py-6 space-y-8 sm:px-6"
+      >
         <TrialExpiredBanner />
 
         {freeQuota && (
@@ -1199,10 +1400,24 @@ function Dashboard() {
           </div>
         </div>
 
-        <section className="space-y-3">
+        {showOnboardingChecklist && (
+          <OnboardingChecklist items={checklistItems} />
+        )}
+
+        <section ref={monthlySummaryRef} className="space-y-3">
           <h2 className="text-lg font-semibold text-white">
             Resumo de {months[selectedMonth]} / {selectedYear}
           </h2>
+          {!onboardingProgress.monthly_summary_seen &&
+            !onboardingProgress.monthly_summary_tip_dismissed && (
+              <ContextTip
+                message="Aqui voce acompanha rapidamente entradas, saidas e saldo do mes atual."
+                onDismiss={async () => {
+                  await dismissTip('monthly-summary')
+                  await markViewStepSeen('monthly-summary')
+                }}
+              />
+            )}
           <SummaryCards month={selectedMonth} year={selectedYear} perfil={perfil} />
         </section>
 
@@ -1220,8 +1435,22 @@ function Dashboard() {
           />
         </section>
 
-        <section className="space-y-3">
-          <SectionAccordion sections={annualAccordionSections} defaultOpenId={null} />
+        <section ref={annualSummaryRef} className="space-y-3">
+          {!onboardingProgress.annual_summary_seen &&
+            !onboardingProgress.annual_summary_tip_dismissed && (
+              <ContextTip
+                message="Use esta visao para comparar os meses do ano e perceber como seu saldo evolui."
+                onDismiss={async () => {
+                  await dismissTip('annual-summary')
+                  await markViewStepSeen('annual-summary')
+                }}
+              />
+            )}
+          <SectionAccordion
+            sections={annualAccordionSections}
+            value={openAnnualSectionId}
+            onValueChange={setOpenAnnualSectionId}
+          />
         </section>
       </main>
 
@@ -1274,42 +1503,45 @@ export default function App() {
     <AuthProvider>
       <EntitlementsProvider>
         <BudgetProvider>
-          <BrowserRouter>
-            <AuthWrapper>
-              <Routes>
-                <Route path="/" element={<EntryRoute />} />
-                <Route path="/login" element={<EntryRoute />} />
-                <Route path="/recuperar-senha" element={<EntryRoute />} />
+          <OnboardingProvider>
+            <BrowserRouter>
+              <AuthWrapper>
+                <Routes>
+                  <Route path="/" element={<EntryRoute />} />
+                  <Route path="/login" element={<EntryRoute />} />
+                  <Route path="/recuperar-senha" element={<EntryRoute />} />
 
-                <Route path="/home" element={<Dashboard />} />
-                <Route path="/settings" element={<Settings />} />
+                  <Route path="/home" element={<Dashboard />} />
+                  <Route path="/settings" element={<Settings />} />
 
-                <Route path="/update-password" element={<UpdatePassword />} />
+                  <Route path="/update-password" element={<UpdatePassword />} />
 
-                <Route
-                  path="/admin/invites"
-                  element={
-                    <AdminOnly>
-                      <InvitesAdminPage />
-                    </AdminOnly>
-                  }
-                />
-                <Route
-                  path="/admin/*"
-                  element={
-                    <AdminOnly>
-                      <Navigate to="/admin/invites" replace />
-                    </AdminOnly>
-                  }
-                />
+                  <Route
+                    path="/admin/invites"
+                    element={
+                      <AdminOnly>
+                        <InvitesAdminPage />
+                      </AdminOnly>
+                    }
+                  />
+                  <Route
+                    path="/admin/*"
+                    element={
+                      <AdminOnly>
+                        <Navigate to="/admin/invites" replace />
+                      </AdminOnly>
+                    }
+                  />
 
-                <Route path="*" element={<EntryRoute />} />
-              </Routes>
+                  <Route path="*" element={<EntryRoute />} />
+                </Routes>
 
-              <PaywallModal />
-              <Toaster position="top-center" />
-            </AuthWrapper>
-          </BrowserRouter>
+                <OnboardingIntro />
+                <PaywallModal />
+                <Toaster position="top-center" />
+              </AuthWrapper>
+            </BrowserRouter>
+          </OnboardingProvider>
         </BudgetProvider>
       </EntitlementsProvider>
     </AuthProvider>
